@@ -1,0 +1,19 @@
+name = "cloudflare-alpaca-paper-trader"
+main = "src/index.js"
+compatibility_date = "2026-08-27"
+
+[triggers]
+crons = ["* * * * 1-5"]
+
+[vars]
+TRADING_ENABLED = "false"
+SYMBOLS = "SPY,QQQ,IWM,NVDA,AAPL,TSLA,AMD,AMZN,META,MSFT"
+MIN_ENTRY_SCORE = "65"
+MAX_CONCURRENT_POSITIONS = "3"
+ORDER_NOTIONAL_USD = "5"
+MAX_POSITION_USD = "5"
+MAX_TOTAL_EXPOSURE_USD = "15"
+STOP_LOSS_PCT = "0.006"
+TAKE_PROFIT_PCT = "0.018"
+TRAIL_TRIGGER_PCT = "0.009"
+TRAIL_GIVEBACK_PCT = "0.0045"
