@@ -6,7 +6,7 @@ compatibility_date = "2026-08-27"
 crons = ["* * * * 1-5"]
 
 [vars]
-TRADING_ENABLED = "false"
+TRADING_ENABLED = "true"
 SYMBOLS = "SPY,QQQ,IWM,NVDA,AAPL,TSLA,AMD,AMZN,META,MSFT"
 MIN_ENTRY_SCORE = "65"
 MAX_CONCURRENT_POSITIONS = "3"
