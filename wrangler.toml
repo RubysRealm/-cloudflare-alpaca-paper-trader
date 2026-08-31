@@ -5,8 +5,18 @@ compatibility_date = "2026-08-27"
 [triggers]
 crons = ["* * * * 1-5"]
 
+[[durable_objects.bindings]]
+name = "TRADING_STATE"
+class_name = "TradingState"
+
+[[migrations]]
+tag = "v8-state-1"
+new_sqlite_classes = ["TradingState"]
+
 [vars]
 TRADING_ENABLED = "true"
+REALTIME_STREAM_ENABLED = "true"
+PERSISTENT_STATE_ENABLED = "true"
 SYMBOLS = "SPY,QQQ,IWM,DIA,NVDA,AAPL,TSLA,AMD,AMZN,META,MSFT,GOOGL,AVGO,NFLX,CRM"
 MARKET_DATA_FEED = "sip"
 DYNAMIC_SCANNER_ENABLED = "true"
