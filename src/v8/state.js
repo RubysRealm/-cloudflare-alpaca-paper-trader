@@ -55,11 +55,15 @@ export class TradingState extends DurableObject {
       const lastMessageAt = Number(this.lastMessageAt || await this.ctx.storage.get("lastMessageAt") || 0);
       return json({
         connected: Boolean(this.ws && this.ws.readyState === 1),
+        readyState: this.ws?.readyState ?? null,
         stream: this.streamConfig || await this.ctx.storage.get("streamConfig") || null,
         highWaterEquity: Number(await this.ctx.storage.get("highWaterEquity") || 0),
         symbolsTracked: Object.keys(this.market).length,
         lastMessageAt,
-        messageAgeSeconds: lastMessageAt ? Math.max(0, Math.round((Date.now() - lastMessageAt) / 1000)) : null
+        messageAgeSeconds: lastMessageAt ? Math.max(0, Math.round((Date.now() - lastMessageAt) / 1000)) : null,
+        lastControlEvent: await this.ctx.storage.get("lastControlEvent") || null,
+        lastStreamError: await this.ctx.storage.get("lastStreamError") || null,
+        lastStreamClose: await this.ctx.storage.get("lastStreamClose") || null
       });
     }
     return json({ error: "not_found" }, 404);
@@ -78,7 +82,9 @@ export class TradingState extends DurableObject {
         if (remove.length) this.ws.send(JSON.stringify({ action: "unsubscribe", trades: remove, quotes: remove, bars: remove, statuses: remove, lulds: remove }));
         if (add.length) this.ws.send(JSON.stringify({ action: "subscribe", trades: add, quotes: add, bars: add, statuses: add, lulds: add }));
       } catch (error) {
-        console.error(JSON.stringify({ event: "stream_resubscribe_failed", message: error.message }));
+        const diag = { at: Date.now(), event: "stream_resubscribe_failed", message: error.message };
+        console.error(JSON.stringify(diag));
+        this.ctx.storage.put("lastStreamError", diag).catch(() => {});
       }
       this.streamConfig = { ...cfg, symbols, updatedAt: Date.now() };
       await this.ctx.storage.put("streamConfig", this.streamConfig);
@@ -104,27 +110,37 @@ export class TradingState extends DurableObject {
     try {
       ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${cfg.feed}`);
     } catch (error) {
-      console.error(JSON.stringify({ event: "stream_connect_failed", message: error.message, feed: cfg.feed }));
+      const diag = { at: Date.now(), event: "stream_connect_failed", message: error.message, feed: cfg.feed };
+      console.error(JSON.stringify(diag));
+      this.ctx.storage.put("lastStreamError", diag).catch(() => {});
       this.ctx.storage.setAlarm(Date.now() + 15_000).catch(() => {});
       return;
     }
 
     this.ws = ws;
     ws.addEventListener("open", () => {
+      const diag = { at: Date.now(), type: "socket_open", feed: cfg.feed };
+      this.ctx.storage.put("lastControlEvent", diag).catch(() => {});
       try {
         ws.send(JSON.stringify({ action: "auth", key: this.env.APCA_API_KEY_ID, secret: this.env.APCA_API_SECRET_KEY }));
       } catch (error) {
-        console.error(JSON.stringify({ event: "stream_auth_send_failed", message: error.message }));
+        const err = { at: Date.now(), event: "stream_auth_send_failed", message: error.message };
+        console.error(JSON.stringify(err));
+        this.ctx.storage.put("lastStreamError", err).catch(() => {});
       }
     });
     ws.addEventListener("message", event => this.onMessage(event.data));
     ws.addEventListener("close", event => {
       if (this.ws === ws) this.ws = null;
-      console.log(JSON.stringify({ event: "stream_closed", code: event.code, reason: event.reason || "" }));
+      const diag = { at: Date.now(), code: event.code, reason: event.reason || "" };
+      console.log(JSON.stringify({ event: "stream_closed", ...diag }));
+      this.ctx.storage.put("lastStreamClose", diag).catch(() => {});
       this.ctx.storage.setAlarm(Date.now() + 5_000).catch(() => {});
     });
     ws.addEventListener("error", event => {
-      console.error(JSON.stringify({ event: "stream_error", message: String(event?.message || "websocket_error") }));
+      const diag = { at: Date.now(), event: "stream_error", message: String(event?.message || "websocket_error") };
+      console.error(JSON.stringify(diag));
+      this.ctx.storage.put("lastStreamError", diag).catch(() => {});
     });
   }
 
@@ -137,6 +153,10 @@ export class TradingState extends DurableObject {
     this.lastMessageAt = now;
     this.ctx.storage.put("lastMessageAt", now).catch(() => {});
     for (const event of events) {
+      if (!event?.S) {
+        const control = { at: now, T: event?.T || null, msg: event?.msg || null, code: event?.code ?? null };
+        this.ctx.storage.put("lastControlEvent", control).catch(() => {});
+      }
       if (event?.T === "success" && event.msg === "authenticated") {
         const symbols = this.streamConfig?.symbols || [];
         this.ws?.send(JSON.stringify({
@@ -150,7 +170,9 @@ export class TradingState extends DurableObject {
         continue;
       }
       if (event?.T === "error") {
-        console.error(JSON.stringify({ event: "alpaca_stream_error", code: event.code, message: event.msg }));
+        const diag = { at: now, code: event.code, message: event.msg || "alpaca_stream_error" };
+        console.error(JSON.stringify({ event: "alpaca_stream_error", ...diag }));
+        this.ctx.storage.put("lastStreamError", diag).catch(() => {});
         if ((event.code === 401 || event.code === 403) && this.streamConfig?.feed !== "iex") {
           this.streamConfig = { ...this.streamConfig, feed: "iex", fallback: true, updatedAt: Date.now() };
           this.ctx.storage.put("streamConfig", this.streamConfig).catch(() => {});
