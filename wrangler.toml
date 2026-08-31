@@ -1,6 +1,8 @@
-name = "cloudflare-alpaca-paper-trader"
+name = "cody-alpaca-paper-guard"
+account_id = "5b83b9af7d53dbd3cedb1cc16678a435"
 main = "src/v8/index.js"
 compatibility_date = "2026-08-27"
+workers_dev = true
 
 [triggers]
 crons = ["* * * * 1-5"]
