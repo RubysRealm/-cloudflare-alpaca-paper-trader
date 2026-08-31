@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for Cloudflare Git deployment
-        run: sleep 20
+        run: sleep 45
       - name: Check production status and realtime state
         shell: bash
         run: |
@@ -25,4 +25,4 @@ jobs:
           echo "PRODUCTION_STATUS=$BODY"
           echo "PRODUCTION_STATE=$STATE"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} status=${x.status} endpoint=${x.endpoint} feed=${x.features?.marketDataFeed} universe=${x.safeguards?.maxUniverseSymbols}`); if(x.strategy!=="intraday-adaptive-v8.1" || x.endpoint!=="paper" || x.status!=="armed" || x.features?.curatedLiquidUniverse!==true || x.features?.discordConsensusEngine!==true || x.features?.marketDataFeed!=="iex" || x.safeguards?.maxUniverseSymbols!==30 || Math.abs((x.safeguards?.maxSpreadPct||0)-0.0015)>1e-9 || x.safeguards?.minDollarVolume!==50000000) process.exit(2)' "$BODY"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`stream_connected=${Boolean(x.connected)} feed=${x.stream?.feed||"unknown"} symbols=${x.symbolsTracked||0} message_age=${x.messageAgeSeconds ?? "na"}`); if(!x.connected || (x.symbolsTracked||0)<1) process.exit(3)' "$STATE"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`stream_connected=${Boolean(x.connected)} feed=${x.stream?.feed||"unknown"} symbols=${x.symbolsTracked||0} message_age=${x.messageAgeSeconds ?? "na"} control=${JSON.stringify(x.lastControlEvent||null)} error=${JSON.stringify(x.lastStreamError||null)} close=${JSON.stringify(x.lastStreamClose||null)}`); if((x.symbolsTracked||0)<1 || x.messageAgeSeconds==null || x.messageAgeSeconds>30) process.exit(3)' "$STATE"
