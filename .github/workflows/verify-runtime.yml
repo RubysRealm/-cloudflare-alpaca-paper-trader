@@ -1,0 +1,22 @@
+name: Verify production Worker runtime
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wrangler.toml'
+      - '.github/workflows/verify-runtime.yml'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check production status endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://cody-alpaca-paper-guard.codygiles28.workers.dev/api/status'
+          BODY="$(curl --fail --silent --show-error --max-time 20 "$URL")"
+          echo "PRODUCTION_STATUS=$BODY"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} status=${x.status} endpoint=${x.endpoint}`); if(!String(x.strategy||"").includes("v8") || x.endpoint!=="paper") process.exit(2)' "$BODY"
