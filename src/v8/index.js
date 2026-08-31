@@ -1,9 +1,10 @@
 import { STRATEGY, TECH, num, pct, int, bool, round, isBotOrder, etParts, entryWindowOpen, inConfiguredBlackout } from "./config.js";
 import { alpaca, dynamicUniverse, fetchBars, fetchSnapshots, fetchAsset, recentNewsRisk, preferredFeed } from "./api.js";
 import { timeframeSignal, combineSignals, marketRegime } from "./signals.js";
-import { calculatePerformanceDetailed, botInventoryFromOrders, botLotsFromOrders, todayPerformance, recentCooldowns, adaptiveLearning } from "./performance.js";
+import { calculatePerformanceDetailed, botLotsFromOrders, todayPerformance, recentCooldowns, adaptiveLearning } from "./performance.js";
 import { cancelStaleBotOrders, exitDecision, placeLimitSell, placeLimitBuy, positionNotional } from "./execution.js";
 import { ensureRealtimeState, getRealtimeMarket, overlayRealtimeSnapshot, updateHighWater, persistJournal, stateHealth } from "./state_client.js";
+import { discordConsensus, applyDiscordConsensus } from "./external_signals.js";
 export { TradingState } from "./state.js";
 
 async function runCycle(env, scheduledTime) {
@@ -40,7 +41,9 @@ async function runCycle(env, scheduledTime) {
     }
   }));
 
-  const signals = bundles.map(x => x[1]).filter(s => s.valid);
+  const rawSignals = bundles.map(x => x[1]).filter(s => s.valid);
+  const discord = await discordConsensus(env, symbols, scheduledTime);
+  const signals = rawSignals.map(s => applyDiscordConsensus(s, discord.votes.get(s.symbol)));
   const map = new Map(signals.map(s => [s.symbol, s]));
 
   const [positions, openOrders, recentOrders, account] = await Promise.all([
@@ -100,9 +103,9 @@ async function runCycle(env, scheduledTime) {
   const regime = marketRegime(map);
   const cooldowns = recentCooldowns(recentOrders, scheduledTime, int(env.SYMBOL_COOLDOWN_MINUTES, 45));
 
-  const maxSpread = pct(env.MAX_SPREAD_PCT, 0.0025);
+  const maxSpread = pct(env.MAX_SPREAD_PCT, 0.0015);
   const maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20);
-  const minDollarVolume = num(env.MIN_DOLLAR_VOLUME_USD, 25_000_000);
+  const minDollarVolume = num(env.MIN_DOLLAR_VOLUME_USD, 50_000_000);
   const minQuoteSize = num(env.MIN_QUOTE_SIZE, 1);
   const minPrice = num(env.MIN_PRICE_USD, 5);
 
@@ -128,7 +131,7 @@ async function runCycle(env, scheduledTime) {
     )
     .sort((a, b) => Math.max(b.score, b.shortScore) - Math.max(a.score, a.shortScore));
 
-  const newsBlocked = await recentNewsRisk(env, ranked.slice(0, 8).map(s => s.symbol), scheduledTime);
+  const newsBlocked = await recentNewsRisk(env, ranked.slice(0, 10).map(s => s.symbol), scheduledTime);
   const currentExposure = botPositions.reduce((sum, p) => sum + Math.abs((+p.qty || 0) * (+p.current_price || 0)), 0);
   const maxPositions = int(env.MAX_CONCURRENT_POSITIONS, 2);
   const maxTotal = num(env.MAX_TOTAL_EXPOSURE_USD, 10);
@@ -146,10 +149,6 @@ async function runCycle(env, scheduledTime) {
     const longOk = regime.longOk && candidate.longConfirmed && candidate.score >= learn.scoreThreshold;
     const shortOk = bool(env.SHORTS_ENABLED, false) && regime.shortOk && candidate.shortConfirmed && candidate.shortScore >= learn.scoreThreshold;
     if (!longOk && !shortOk) continue;
-
-    // The short signal framework is deliberately separate from the long execution path.
-    // Fractional short sales are not used; short execution remains disabled until whole-share
-    // sizing and a dedicated validation sample meet the configured risk limits.
     if (shortOk) continue;
 
     if (TECH.has(candidate.symbol) && techCount >= int(env.MAX_TECH_POSITIONS, 1)) continue;
@@ -168,9 +167,11 @@ async function runCycle(env, scheduledTime) {
     actions.push({
       action: "buy",
       symbol: candidate.symbol,
-      reason: candidate.s5.pullback ? "mtf_pullback" : "mtf_breakout",
+      reason: candidate.discord?.longSources >= 2 ? "mtf_discord_consensus" : candidate.s5.pullback ? "mtf_pullback" : "mtf_breakout",
       score: round(candidate.score, 1),
       spreadPct: round(candidate.spreadPct, 5),
+      discordLongSources: candidate.discord?.longSources || 0,
+      discordShortSources: candidate.discord?.shortSources || 0,
       notional: round(notional, 2)
     });
 
@@ -180,6 +181,14 @@ async function runCycle(env, scheduledTime) {
     if (TECH.has(candidate.symbol)) techCount++;
   }
 
+  const discordSummary = [...discord.votes.entries()].slice(0, 12).map(([symbol, v]) => ({
+    symbol,
+    longSources: v.longSources.size,
+    shortSources: v.shortSources.size,
+    longWeight: round(v.longWeight, 2),
+    shortWeight: round(v.shortWeight, 2)
+  }));
+
   const journal = {
     event: "decision_journal",
     ts: new Date(+scheduledTime).toISOString(),
@@ -187,6 +196,7 @@ async function runCycle(env, scheduledTime) {
     feed: snap.feed,
     realtimeStream: Boolean(liveMarket && Object.keys(liveMarket).length),
     universe: symbols,
+    externalSignals: { discordConfigured: discord.configured, channels: discord.channels, consensus: discordSummary },
     regime,
     learning: learn,
     perf: {
@@ -210,7 +220,7 @@ async function runCycle(env, scheduledTime) {
       lossCountGuard: lossCount,
       consecutiveLossGuard: consec
     },
-    leaders: ranked.slice(0, 6).map(s => ({
+    leaders: ranked.slice(0, 8).map(s => ({
       symbol: s.symbol,
       score: round(s.score, 1),
       shortScore: round(s.shortScore, 1),
@@ -218,6 +228,8 @@ async function runCycle(env, scheduledTime) {
       rvol: round(s.rvol, 2),
       rsi: round(s.rsi, 1),
       dollarVolume: round(s.dollarVolume, 0),
+      discordLongSources: s.discord?.longSources || 0,
+      discordShortSources: s.discord?.shortSources || 0,
       halted: s.halted,
       nearLuld: s.nearLuld
     })),
@@ -234,6 +246,7 @@ async function runCycle(env, scheduledTime) {
     feed: snap.feed,
     realtimeStream: journal.realtimeStream,
     universe: symbols,
+    externalSignals: journal.externalSignals,
     regime,
     learning: learn,
     daily: journal.daily,
@@ -281,7 +294,7 @@ async function dashboard(env) {
     `<tr><td>${esc(o.submitted_at ? new Date(o.submitted_at).toLocaleString("en-US", { timeZone: "America/New_York" }) : "—")}</td><td>${esc(o.symbol)}</td><td>${esc(String(o.side || "").toUpperCase())}</td><td>${esc(o.type)}</td><td>${esc(o.status)}</td><td>${o.filled_avg_price ? money(o.filled_avg_price) : "—"}</td></tr>`
   ).join("");
 
-  return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Adaptive Paper Trader v8</title><style>:root{color-scheme:dark;--bg:#0b1020;--card:#151c32;--line:#2a3557;--text:#eef3ff;--muted:#9eabc9;--green:#2dd4a8}*{box-sizing:border-box}body{margin:0;background:var(--bg);font:15px system-ui;color:var(--text)}main{max-width:1250px;margin:auto;padding:28px 18px 50px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:17px}.label{color:var(--muted);font-size:12px;text-transform:uppercase}.value{font-size:23px;font-weight:750;margin-top:7px}.small{font-size:13px;color:var(--muted);margin-top:7px}header{display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:22px}.badge{border:1px solid var(--green);color:var(--green);padding:7px 11px;border-radius:999px;font-weight:700}table{width:100%;border-collapse:collapse;background:var(--card);margin-top:22px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px}</style></head><body><main><header><div><h1>Alpaca Adaptive Intraday Guard v8</h1><div class="small">Paper-only · realtime stream + 1m/5m/15m confirmation · spread/liquidity/halt protection · adaptive risk</div></div><div class="badge">${String(env.TRADING_ENABLED) === "true" ? "ARMED" : "DISABLED"}</div></header><div class="grid"><div class="card"><div class="label">Paper equity</div><div class="value">${money(account.equity)}</div><div class="small">Buying power ${money(account.buying_power)}</div></div><div class="card"><div class="label">Realized bot P&L</div><div class="value">${money(perf.realizedPnl)}</div><div class="small">${perf.trades} completed exits</div></div><div class="card"><div class="label">Open bot P&L</div><div class="value">${money(unrealized)}</div><div class="small">${botPositions.length} isolated bot positions</div></div><div class="card"><div class="label">Win rate</div><div class="value">${percent(perf.winRate)}</div><div class="small">${perf.wins} wins / ${perf.losses} losses</div></div><div class="card"><div class="label">Profit factor</div><div class="value">${Number(perf.profitFactor || 0).toFixed(2)}</div><div class="small">Expectancy ${money(perf.expectancy)}</div></div><div class="card"><div class="label">Realtime stream</div><div class="value">${state?.connected ? "LIVE" : "FALLBACK"}</div><div class="small">${esc((state?.stream?.feed || preferredFeed(env)).toUpperCase())} · high-water ${money(state?.highWaterEquity || 0)}</div></div></div><table><thead><tr><th>Time ET</th><th>Symbol</th><th>Side</th><th>Order</th><th>Status</th><th>Fill</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No bot orders yet.</td></tr>'}</tbody></table><div class="small" style="margin-top:16px">Paper simulation only. No strategy can guarantee profit.</div></main></body></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+  return new Response(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="60"><title>Adaptive Paper Trader v8.1</title><style>:root{color-scheme:dark;--bg:#0b1020;--card:#151c32;--line:#2a3557;--text:#eef3ff;--muted:#9eabc9;--green:#2dd4a8}*{box-sizing:border-box}body{margin:0;background:var(--bg);font:15px system-ui;color:var(--text)}main{max-width:1250px;margin:auto;padding:28px 18px 50px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(185px,1fr));gap:14px}.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:17px}.label{color:var(--muted);font-size:12px;text-transform:uppercase}.value{font-size:23px;font-weight:750;margin-top:7px}.small{font-size:13px;color:var(--muted);margin-top:7px}header{display:flex;justify-content:space-between;gap:15px;align-items:center;margin-bottom:22px}.badge{border:1px solid var(--green);color:var(--green);padding:7px 11px;border-radius:999px;font-weight:700}table{width:100%;border-collapse:collapse;background:var(--card);margin-top:22px}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line)}th{color:var(--muted);font-size:12px}</style></head><body><main><header><div><h1>Alpaca Adaptive Intraday Guard v8.1</h1><div class="small">Paper-only · realtime IEX stream + 1m/5m/15m confirmation · curated liquid universe · external-signal consensus · adaptive risk</div></div><div class="badge">${String(env.TRADING_ENABLED) === "true" ? "ARMED" : "DISABLED"}</div></header><div class="grid"><div class="card"><div class="label">Paper equity</div><div class="value">${money(account.equity)}</div><div class="small">Buying power ${money(account.buying_power)}</div></div><div class="card"><div class="label">Realized bot P&L</div><div class="value">${money(perf.realizedPnl)}</div><div class="small">${perf.trades} completed exits</div></div><div class="card"><div class="label">Open bot P&L</div><div class="value">${money(unrealized)}</div><div class="small">${botPositions.length} isolated bot positions</div></div><div class="card"><div class="label">Win rate</div><div class="value">${percent(perf.winRate)}</div><div class="small">${perf.wins} wins / ${perf.losses} losses</div></div><div class="card"><div class="label">Profit factor</div><div class="value">${Number(perf.profitFactor || 0).toFixed(2)}</div><div class="small">Expectancy ${money(perf.expectancy)}</div></div><div class="card"><div class="label">Realtime stream</div><div class="value">${state?.connected ? "LIVE" : "FALLBACK"}</div><div class="small">${esc((state?.stream?.feed || preferredFeed(env)).toUpperCase())} · high-water ${money(state?.highWaterEquity || 0)}</div></div></div><table><thead><tr><th>Time ET</th><th>Symbol</th><th>Side</th><th>Order</th><th>Status</th><th>Fill</th></tr></thead><tbody>${rows || '<tr><td colspan="6">No bot orders yet.</td></tr>'}</tbody></table><div class="small" style="margin-top:16px">Paper simulation only. No strategy or signal source can guarantee profit.</div></main></body></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
 }
 
 const app = {
@@ -298,6 +311,8 @@ const app = {
         endpoint: "paper",
         features: {
           dynamicScanner: bool(env.DYNAMIC_SCANNER_ENABLED, true),
+          curatedLiquidUniverse: true,
+          inverseIndexEtfs: ["SH", "PSQ", "RWM"],
           marketDataFeed: preferredFeed(env),
           realtimeWebSocketRelay: bool(env.REALTIME_STREAM_ENABLED, true),
           realtimeStreamConnected: Boolean(state?.connected),
@@ -315,6 +330,8 @@ const app = {
           regimeFilter: true,
           chopFilter: true,
           newsRiskFilter: bool(env.NEWS_RISK_FILTER_ENABLED, true),
+          discordConsensusEngine: true,
+          discordLiveConfigured: bool(env.DISCORD_SIGNAL_ENABLED, true) && Boolean(env.DISCORD_BOT_TOKEN) && Boolean(String(env.DISCORD_SIGNAL_CHANNELS || "").trim()),
           adaptiveLearning: true,
           rollingWalkForward: true,
           drawdownGovernor: true,
@@ -326,13 +343,14 @@ const app = {
         safeguards: {
           minEntryScore: num(env.MIN_ENTRY_SCORE, 82),
           maxConcurrentPositions: int(env.MAX_CONCURRENT_POSITIONS, 2),
+          maxUniverseSymbols: int(env.MAX_UNIVERSE_SYMBOLS, 30),
           maxDailyLossPct: pct(env.MAX_DAILY_LOSS_PCT, 0.01),
           maxDailyLosingExits: int(env.MAX_DAILY_LOSING_EXITS, 3),
           maxConsecutiveLosses: int(env.MAX_CONSECUTIVE_LOSSES, 3),
           symbolCooldownMinutes: int(env.SYMBOL_COOLDOWN_MINUTES, 45),
-          maxSpreadPct: pct(env.MAX_SPREAD_PCT, 0.0025),
+          maxSpreadPct: pct(env.MAX_SPREAD_PCT, 0.0015),
           maxQuoteAgeSeconds: int(env.MAX_QUOTE_AGE_SECONDS, 20),
-          minDollarVolume: num(env.MIN_DOLLAR_VOLUME_USD, 25_000_000),
+          minDollarVolume: num(env.MIN_DOLLAR_VOLUME_USD, 50_000_000),
           minQuoteSize: num(env.MIN_QUOTE_SIZE, 1),
           minPriceUsd: num(env.MIN_PRICE_USD, 5)
         }
