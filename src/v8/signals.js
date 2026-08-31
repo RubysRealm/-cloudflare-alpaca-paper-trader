@@ -38,11 +38,20 @@ export function combineSignals(symbol, s1, s5, s15, snap) {
   const sa = s1.downTrend && s5.downTrend && s15.downTrend && s5.downSlope && s15.downSlope && s5.belowVwap;
   const hr = s5.rsi14 >= 52 && s5.rsi14 <= 72, hs = s5.rsi14 >= 28 && s5.rsi14 <= 48, vc = s5.relVolume >= 1.1, sv = s5.atrPct >= 0.001 && s5.atrPct <= 0.022;
   const ne = last <= Math.max(s5.vwap, s5.ema9) * 1.0065, nes = last >= Math.min(s5.vwap, s5.ema9) * 0.9935, ch = s1.choppy && s5.choppy;
+  const volumeBoost = Math.min(12, Math.max(0, (s5.relVolume - 1.1) * 7));
+  const longVelocity = s1.ret3 > 0 && s5.ret3 > 0 && s15.ret3 > 0 ? 10 : (s1.ret3 > 0 && s5.ret3 > 0 ? 5 : 0);
+  const shortVelocity = s1.ret3 < 0 && s5.ret3 < 0 && s15.ret3 < 0 ? 10 : (s1.ret3 < 0 && s5.ret3 < 0 ? 5 : 0);
+  const longAcceleration = s1.ret1 > 0 && s1.ret3 > 0 && s5.ret1 > 0 ? 5 : 0;
+  const shortAcceleration = s1.ret1 < 0 && s1.ret3 < 0 && s5.ret1 < 0 ? 5 : 0;
+  const longChasePenalty = s1.ret3 > 0.018 || s5.ret3 > 0.03 ? 18 : s1.ret1 > 0.01 ? 10 : 0;
+  const shortChasePenalty = s1.ret3 < -0.018 || s5.ret3 < -0.03 ? 18 : s1.ret1 < -0.01 ? 10 : 0;
   let score = 0, ss = 0;
-  if (la) score += 30; if (s5.pullback) score += 18; if (s5.breakout && s5.momentum) score += 20; if (s15.trendSlope) score += 10; if (hr) score += 8; if (vc) score += 10; if (sv) score += 7; if (!ch) score += 8; if (spread <= 0.0015) score += 7;
-  if (s5.ret1 > 0.008) score -= 12; if (spread > 0.003) score -= 20; if (qa > 20) score -= 25; if (ch) score -= 18; if (halted || nearLuld) score -= 100;
-  if (sa) ss += 30; if (s5.shortPullback) ss += 18; if (s5.breakdown && s5.downsideMomentum) ss += 20; if (s15.downSlope) ss += 10; if (hs) ss += 8; if (vc) ss += 10; if (sv) ss += 7; if (!ch) ss += 8; if (spread <= 0.0015) ss += 7;
-  if (s5.ret1 < -0.008) ss -= 12; if (spread > 0.003) ss -= 20; if (qa > 20) ss -= 25; if (ch) ss -= 18; if (halted || nearLuld) ss -= 100;
+  if (la) score += 30; if (s5.pullback) score += 18; if (s5.breakout && s5.momentum) score += 20; if (s15.trendSlope) score += 10; if (hr) score += 8; if (vc) score += 10; if (sv) score += 7; if (!ch) score += 8; if (spread <= 0.0012) score += 8;
+  score += volumeBoost + longVelocity + longAcceleration - longChasePenalty;
+  if (s5.ret1 > 0.008) score -= 12; if (spread > 0.0025) score -= 24; if (qa > 15) score -= 30; if (ch) score -= 18; if (halted || nearLuld) score -= 100;
+  if (sa) ss += 30; if (s5.shortPullback) ss += 18; if (s5.breakdown && s5.downsideMomentum) ss += 20; if (s15.downSlope) ss += 10; if (hs) ss += 8; if (vc) ss += 10; if (sv) ss += 7; if (!ch) ss += 8; if (spread <= 0.0012) ss += 8;
+  ss += volumeBoost + shortVelocity + shortAcceleration - shortChasePenalty;
+  if (s5.ret1 < -0.008) ss -= 12; if (spread > 0.0025) ss -= 24; if (qa > 15) ss -= 30; if (ch) ss -= 18; if (halted || nearLuld) ss -= 100;
   return {
     symbol, valid: true, price: last, bid, ask, bidSize, askSize, dollarVolume, mid, spreadPct: spread, quoteAgeSec: qa, tradeAgeSec: ta,
     halted, nearLuld, limitUp, limitDown, atrPct: s5.atrPct, rvol: s5.relVolume, rsi: s5.rsi14,
