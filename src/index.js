@@ -259,8 +259,19 @@ async function runCycle(env, scheduledTime) {
 
   const symbols = universe(env);
   const barLimit = 80;
-  const data = await marketData(env, `/v2/stocks/bars?symbols=${encodeURIComponent(symbols.join(","))}&timeframe=5Min&limit=${barLimit}&feed=iex&adjustment=raw`);
-  const signals = symbols.map(s => barsToSignal(s, data.bars?.[s] || [])).filter(s => s.valid);
+  // Alpaca's multi-symbol historical-bars limit is shared across symbols and
+  // results are symbol-sorted, which can starve later symbols. Fetch each
+  // symbol independently and request newest-first so indicators have enough
+  // cross-session history even near the market open.
+  const barResults = await Promise.all(symbols.map(async symbol => {
+    const data = await marketData(env,
+      `/v2/stocks/${encodeURIComponent(symbol)}/bars?timeframe=5Min&limit=${barLimit}&feed=iex&adjustment=raw&sort=desc`
+    );
+    const bars = Array.isArray(data.bars) ? [...data.bars].reverse() : [];
+    return [symbol, bars];
+  }));
+  const barsBySymbol = Object.fromEntries(barResults);
+  const signals = symbols.map(s => barsToSignal(s, barsBySymbol[s] || [])).filter(s => s.valid);
   const signalMap = Object.fromEntries(signals.map(s => [s.symbol, s]));
 
   const [positions, openOrders, recentOrders, account] = await Promise.all([
