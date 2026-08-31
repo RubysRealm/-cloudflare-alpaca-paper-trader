@@ -7,7 +7,9 @@ const DEFAULT_APPROVED = [
   "SPY","QQQ","IWM","DIA","VTI","SH","PSQ","RWM","XLK","XLF","XLE","XLI","XLY","XLP","XLV","XLU","XLB","XLRE","SMH","SOXX","XBI","KRE","TLT","GLD","SLV","USO","HYG",
   "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","AVGO","NFLX","CRM","ORCL","INTC","MU","QCOM","ARM","PLTR","COIN","HOOD","JPM","BAC","GS","WFC","XOM","CVX","CAT","BA","UBER","DIS","WMT","COST","LLY","UNH","JNJ","PFE"
 ];
-const CORE = ["SPY","QQQ","IWM","DIA","SH","PSQ","RWM","XLK","XLF","XLE","SMH","TLT","GLD"];
+const REGIME = ["SPY","QQQ","IWM"];
+const CORE = ["DIA","SH","PSQ","RWM","XLK","XLF","XLE","SMH","TLT","GLD"];
+const NORMAL_SYMBOL = /^[A-Z]{1,5}$/;
 
 export async function alpaca(env, path, init = {}) {
   const r = await fetch(`${PAPER_API}${path}`, { ...init, headers: { ...headers(env), ...(init.headers || {}) } });
@@ -44,24 +46,29 @@ function approvedUniverse(env) {
 }
 
 export async function dynamicUniverse(env) {
-  const max = int(env.MAX_UNIVERSE_SYMBOLS, 30), base = staticUniverse(env), approved = approvedUniverse(env);
-  if (!bool(env.DYNAMIC_SCANNER_ENABLED, true)) return [...new Set([...CORE, ...base])].filter(s => approved.has(s)).slice(0, max);
-  const discovered = [];
+  const max = int(env.MAX_UNIVERSE_SYMBOLS, 40), base = staticUniverse(env), approved = approvedUniverse(env);
+  const broad = bool(env.BROAD_SCANNER_ENABLED, true);
+  const allowed = symbol => NORMAL_SYMBOL.test(symbol) && (broad || approved.has(symbol));
+  if (!bool(env.DYNAMIC_SCANNER_ENABLED, true)) return [...new Set([...REGIME, ...CORE, ...base])].filter(allowed).slice(0, max);
+
+  const movers = [], actives = [];
   try {
-    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/most-actives?top=${int(env.SCANNER_MOST_ACTIVE_TOP, 50)}&by=volume`);
-    for (const z of x?.most_actives || x?.mostActives || []) {
-      const symbol = String(z.symbol || "").toUpperCase();
-      if (approved.has(symbol)) discovered.push(symbol);
-    }
-  } catch (e) { console.log(JSON.stringify({ event: "scanner_degraded", source: "most_actives", message: e.message })); }
-  try {
-    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/movers?top=${int(env.SCANNER_MOVERS_TOP, 25)}`);
+    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/movers?top=${int(env.SCANNER_MOVERS_TOP, 50)}`);
     for (const z of [...(x?.gainers || []), ...(x?.losers || [])]) {
       const symbol = String(z.symbol || "").toUpperCase();
-      if (approved.has(symbol)) discovered.push(symbol);
+      if (allowed(symbol)) movers.push(symbol);
     }
   } catch (e) { console.log(JSON.stringify({ event: "scanner_degraded", source: "movers", message: e.message })); }
-  return [...new Set([...CORE, ...discovered, ...base])].filter(s => approved.has(s)).slice(0, max);
+
+  try {
+    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/most-actives?top=${int(env.SCANNER_MOST_ACTIVE_TOP, 100)}&by=volume`);
+    for (const z of x?.most_actives || x?.mostActives || []) {
+      const symbol = String(z.symbol || "").toUpperCase();
+      if (allowed(symbol)) actives.push(symbol);
+    }
+  } catch (e) { console.log(JSON.stringify({ event: "scanner_degraded", source: "most_actives", message: e.message })); }
+
+  return [...new Set([...REGIME, ...movers, ...actives, ...CORE, ...base])].filter(allowed).slice(0, max);
 }
 
 export async function fetchBars(env, symbol, timeframe, limit) {
