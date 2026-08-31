@@ -113,7 +113,7 @@ export class TradingState extends DurableObject {
       const diag = { at: Date.now(), event: "stream_connect_failed", message: error.message, feed: cfg.feed };
       console.error(JSON.stringify(diag));
       this.ctx.storage.put("lastStreamError", diag).catch(() => {});
-      this.ctx.storage.setAlarm(Date.now() + 15_000).catch(() => {});
+      this.ctx.storage.setAlarm(Date.now() + 30_000).catch(() => {});
       return;
     }
 
@@ -135,7 +135,8 @@ export class TradingState extends DurableObject {
       const diag = { at: Date.now(), code: event.code, reason: event.reason || "" };
       console.log(JSON.stringify({ event: "stream_closed", ...diag }));
       this.ctx.storage.put("lastStreamClose", diag).catch(() => {});
-      this.ctx.storage.setAlarm(Date.now() + 5_000).catch(() => {});
+      const delay = String(event.reason || "").includes("connection_limit") ? 60_000 : 10_000;
+      this.ctx.storage.setAlarm(Date.now() + delay).catch(() => {});
     });
     ws.addEventListener("error", event => {
       const diag = { at: Date.now(), event: "stream_error", message: String(event?.message || "websocket_error") };
@@ -158,6 +159,7 @@ export class TradingState extends DurableObject {
         this.ctx.storage.put("lastControlEvent", control).catch(() => {});
       }
       if (event?.T === "success" && event.msg === "authenticated") {
+        this.ctx.storage.delete("lastStreamError").catch(() => {});
         const symbols = this.streamConfig?.symbols || [];
         this.ws?.send(JSON.stringify({
           action: "subscribe",
@@ -173,6 +175,14 @@ export class TradingState extends DurableObject {
         const diag = { at: now, code: event.code, message: event.msg || "alpaca_stream_error" };
         console.error(JSON.stringify({ event: "alpaca_stream_error", ...diag }));
         this.ctx.storage.put("lastStreamError", diag).catch(() => {});
+
+        if (Number(event.code) === 406 || /connection limit/i.test(String(event.msg || ""))) {
+          const ws = this.ws;
+          this.ws = null;
+          try { ws?.close(1000, "connection_limit_backoff"); } catch {}
+          this.ctx.storage.setAlarm(Date.now() + 60_000).catch(() => {});
+          continue;
+        }
         if ((event.code === 401 || event.code === 403) && this.streamConfig?.feed !== "iex") {
           this.streamConfig = { ...this.streamConfig, feed: "iex", fallback: true, updatedAt: Date.now() };
           this.ctx.storage.put("streamConfig", this.streamConfig).catch(() => {});
