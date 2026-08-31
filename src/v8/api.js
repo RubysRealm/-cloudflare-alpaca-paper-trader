@@ -75,6 +75,12 @@ export async function fetchSnapshots(env, symbols) {
   return { snapshots: r.data || {}, feed: r.feed };
 }
 
+export async function fetchLatestQuote(env, symbol) {
+  const r = await marketData(env, f => `/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=${f}`);
+  const q = r.data?.quote || r.data?.latestQuote || r.data || {};
+  return { quote: q, feed: r.feed };
+}
+
 export async function fetchAsset(env, symbol) {
   try { return await alpaca(env, `/v2/assets/${encodeURIComponent(symbol)}`); }
   catch (error) { console.log(JSON.stringify({ event: "asset_check_failed", symbol, message: error.message })); return null; }
