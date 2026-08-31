@@ -5,6 +5,7 @@ const sd = a => { if (a.length < 2) return 0; const m = avg(a); return Math.sqrt
 const ema = (a, p) => { if (!a.length) return 0; const k = 2 / (p + 1); let e = a[0]; for (let i = 1; i < a.length; i++) e = a[i] * k + e * (1 - k); return e; };
 const rsi = (a, p = 14) => { if (a.length <= p) return 50; let g = 0, l = 0; for (let i = a.length - p; i < a.length; i++) { const d = a[i] - a[i - 1]; d >= 0 ? g += d : l -= d; } if (!l) return 100; const r = g / l; return 100 - 100 / (1 + r); };
 const atr = (b, p = 14) => { if (!b || b.length < p + 1) return 0; const t = []; for (let i = b.length - p; i < b.length; i++) { const h = +b[i].h, l = +b[i].l, pc = +b[i - 1].c; t.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc))); } return avg(t); };
+const INVERSE = new Set(["SH", "PSQ", "RWM"]);
 
 export function timeframeSignal(symbol, bars) {
   const b = (bars || []).filter(x => [x.c, x.h, x.l, x.v].every(v => Number.isFinite(+v)));
@@ -53,11 +54,18 @@ export function combineSignals(symbol, s1, s5, s15, snap) {
 }
 
 export function marketRegime(map) {
-  const vals = [...map.values()], r = ["SPY", "QQQ", "IWM"].map(s => map.get(s)).filter(Boolean);
+  const entries = [...map.entries()], vals = entries.filter(([symbol]) => !INVERSE.has(symbol)).map(([, signal]) => signal);
+  const r = ["SPY", "QQQ", "IWM"].map(s => map.get(s)).filter(Boolean);
   if (!r.length) return { mode: "unknown", longOk: true, shortOk: false, breadth: 0, shock: false };
   const l = r.filter(s => s.longAligned).length, sh = r.filter(s => s.shortAligned).length;
   const b = vals.filter(s => s.valid).reduce((a, s) => a + (s.longAligned ? 1 : s.shortAligned ? -1 : 0), 0) / Math.max(1, vals.length);
   const shock = r.some(s => Math.abs(s.s1.ret1) > 0.008 || s.spreadPct > 0.004 || s.halted || s.nearLuld);
   const mode = shock ? "shock" : l >= 2 && b > 0.1 ? "bull" : sh >= 2 && b < -0.1 ? "bear" : "sideways";
-  return { mode, longOk: mode === "bull" && !shock, shortOk: mode === "bear" && !shock, breadth: round(b, 3), shock };
+  return {
+    mode,
+    longOk: (mode === "bull" || mode === "bear") && !shock,
+    shortOk: mode === "bear" && !shock,
+    breadth: round(b, 3),
+    shock
+  };
 }
