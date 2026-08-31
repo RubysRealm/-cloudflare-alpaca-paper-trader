@@ -70,8 +70,6 @@ export class TradingState extends DurableObject {
     const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
     const connected = Boolean(this.ws && this.ws.readyState === 1);
 
-    // Dynamic scanner membership changes frequently. Never tear down a healthy socket merely
-    // because one scanner symbol changed; update subscriptions in place instead.
     if (connected && cfg?.feed === feed) {
       const old = new Set(cfg.symbols || []), next = new Set(symbols);
       const add = symbols.filter(s => !old.has(s));
@@ -88,53 +86,46 @@ export class TradingState extends DurableObject {
       return;
     }
 
-    // Reconnect only when the socket is actually down or the requested feed changed.
     if (this.ws) {
       try { this.ws.close(1000, "feed_change_or_reconnect"); } catch {}
       this.ws = null;
     }
     this.streamConfig = { symbols, feed, updatedAt: Date.now() };
     await this.ctx.storage.put("streamConfig", this.streamConfig);
-    await this.connect();
+    this.connect();
     await this.ctx.storage.setAlarm(Date.now() + 8 * 60_000);
   }
 
-  async connect() {
-    const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
+  connect() {
+    const cfg = this.streamConfig;
     if (!cfg?.symbols?.length) return;
-    let response;
+
+    let ws;
     try {
-      response = await fetch(`https://stream.data.alpaca.markets/v2/${cfg.feed}`, {
-        headers: { Upgrade: "websocket" }
-      });
+      ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${cfg.feed}`);
     } catch (error) {
       console.error(JSON.stringify({ event: "stream_connect_failed", message: error.message, feed: cfg.feed }));
-      await this.ctx.storage.setAlarm(Date.now() + 15_000);
+      this.ctx.storage.setAlarm(Date.now() + 15_000).catch(() => {});
       return;
     }
-    const ws = response.webSocket;
-    if (!ws) {
-      console.error(JSON.stringify({ event: "stream_upgrade_failed", status: response.status, feed: cfg.feed }));
-      if (cfg.feed !== "iex") {
-        this.streamConfig = { ...cfg, feed: "iex", fallback: true, updatedAt: Date.now() };
-        await this.ctx.storage.put("streamConfig", this.streamConfig);
-        await this.ctx.storage.setAlarm(Date.now() + 2_000);
-      } else {
-        await this.ctx.storage.setAlarm(Date.now() + 15_000);
-      }
-      return;
-    }
-    ws.accept();
+
     this.ws = ws;
+    ws.addEventListener("open", () => {
+      try {
+        ws.send(JSON.stringify({ action: "auth", key: this.env.APCA_API_KEY_ID, secret: this.env.APCA_API_SECRET_KEY }));
+      } catch (error) {
+        console.error(JSON.stringify({ event: "stream_auth_send_failed", message: error.message }));
+      }
+    });
     ws.addEventListener("message", event => this.onMessage(event.data));
-    ws.addEventListener("close", () => {
-      this.ws = null;
+    ws.addEventListener("close", event => {
+      if (this.ws === ws) this.ws = null;
+      console.log(JSON.stringify({ event: "stream_closed", code: event.code, reason: event.reason || "" }));
       this.ctx.storage.setAlarm(Date.now() + 5_000).catch(() => {});
     });
     ws.addEventListener("error", event => {
       console.error(JSON.stringify({ event: "stream_error", message: String(event?.message || "websocket_error") }));
     });
-    ws.send(JSON.stringify({ action: "auth", key: this.env.APCA_API_KEY_ID, secret: this.env.APCA_API_SECRET_KEY }));
   }
 
   onMessage(raw) {
@@ -198,7 +189,7 @@ export class TradingState extends DurableObject {
     const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
     if (cfg?.symbols?.length) {
       this.streamConfig = cfg;
-      if (!this.ws || this.ws.readyState !== 1) await this.connect();
+      if (!this.ws || this.ws.readyState !== 1) this.connect();
       await this.ctx.storage.setAlarm(Date.now() + 8 * 60_000);
     }
   }
