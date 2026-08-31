@@ -14,6 +14,7 @@ export class TradingState extends DurableObject {
     this.market = {};
     this.streamConfig = null;
     this.persistTimer = null;
+    this.lastMessageAt = 0;
   }
 
   async fetch(request) {
@@ -23,7 +24,7 @@ export class TradingState extends DurableObject {
       const symbols = [...new Set((body.symbols || []).map(s => String(s).toUpperCase()).filter(Boolean))].slice(0, 50);
       const feed = String(body.feed || "iex").toLowerCase();
       await this.ensureStream(symbols, feed);
-      return json({ ok: true, connected: Boolean(this.ws && this.ws.readyState === 1), feed, symbols });
+      return json({ ok: true, connected: Boolean(this.ws && this.ws.readyState === 1), feed: this.streamConfig?.feed || feed, symbols: this.streamConfig?.symbols || symbols });
     }
     if (request.method === "GET" && url.pathname === "/market") {
       if (!Object.keys(this.market).length) this.market = (await this.ctx.storage.get("market")) || {};
@@ -50,11 +51,15 @@ export class TradingState extends DurableObject {
       return json({ journals: (await this.ctx.storage.get("journals")) || [] });
     }
     if (request.method === "GET" && url.pathname === "/health") {
+      if (!Object.keys(this.market).length) this.market = (await this.ctx.storage.get("market")) || {};
+      const lastMessageAt = Number(this.lastMessageAt || await this.ctx.storage.get("lastMessageAt") || 0);
       return json({
         connected: Boolean(this.ws && this.ws.readyState === 1),
         stream: this.streamConfig || await this.ctx.storage.get("streamConfig") || null,
         highWaterEquity: Number(await this.ctx.storage.get("highWaterEquity") || 0),
-        symbolsTracked: Object.keys(this.market).length
+        symbolsTracked: Object.keys(this.market).length,
+        lastMessageAt,
+        messageAgeSeconds: lastMessageAt ? Math.max(0, Math.round((Date.now() - lastMessageAt) / 1000)) : null
       });
     }
     return json({ error: "not_found" }, 404);
@@ -62,14 +67,30 @@ export class TradingState extends DurableObject {
 
   async ensureStream(symbols, feed) {
     if (!symbols.length || !this.env.APCA_API_KEY_ID || !this.env.APCA_API_SECRET_KEY) return;
-    const same = this.streamConfig && this.streamConfig.feed === feed &&
-      this.streamConfig.symbols.join(",") === symbols.join(",");
-    if (same && this.ws && this.ws.readyState === 1) {
+    const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
+    const connected = Boolean(this.ws && this.ws.readyState === 1);
+
+    // Dynamic scanner membership changes frequently. Never tear down a healthy socket merely
+    // because one scanner symbol changed; update subscriptions in place instead.
+    if (connected && cfg?.feed === feed) {
+      const old = new Set(cfg.symbols || []), next = new Set(symbols);
+      const add = symbols.filter(s => !old.has(s));
+      const remove = [...old].filter(s => !next.has(s));
+      try {
+        if (remove.length) this.ws.send(JSON.stringify({ action: "unsubscribe", trades: remove, quotes: remove, bars: remove, statuses: remove, lulds: remove }));
+        if (add.length) this.ws.send(JSON.stringify({ action: "subscribe", trades: add, quotes: add, bars: add, statuses: add, lulds: add }));
+      } catch (error) {
+        console.error(JSON.stringify({ event: "stream_resubscribe_failed", message: error.message }));
+      }
+      this.streamConfig = { ...cfg, symbols, updatedAt: Date.now() };
+      await this.ctx.storage.put("streamConfig", this.streamConfig);
       await this.ctx.storage.setAlarm(Date.now() + 8 * 60_000);
       return;
     }
+
+    // Reconnect only when the socket is actually down or the requested feed changed.
     if (this.ws) {
-      try { this.ws.close(1000, "resubscribe"); } catch {}
+      try { this.ws.close(1000, "feed_change_or_reconnect"); } catch {}
       this.ws = null;
     }
     this.streamConfig = { symbols, feed, updatedAt: Date.now() };
@@ -99,7 +120,7 @@ export class TradingState extends DurableObject {
         await this.ctx.storage.put("streamConfig", this.streamConfig);
         await this.ctx.storage.setAlarm(Date.now() + 2_000);
       } else {
-        await this.ctx.storage.setAlarm(Date.now() + 30_000);
+        await this.ctx.storage.setAlarm(Date.now() + 15_000);
       }
       return;
     }
@@ -108,7 +129,7 @@ export class TradingState extends DurableObject {
     ws.addEventListener("message", event => this.onMessage(event.data));
     ws.addEventListener("close", () => {
       this.ws = null;
-      this.ctx.storage.setAlarm(Date.now() + 10_000).catch(() => {});
+      this.ctx.storage.setAlarm(Date.now() + 5_000).catch(() => {});
     });
     ws.addEventListener("error", event => {
       console.error(JSON.stringify({ event: "stream_error", message: String(event?.message || "websocket_error") }));
@@ -121,6 +142,9 @@ export class TradingState extends DurableObject {
     try { events = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)); }
     catch { return; }
     if (!Array.isArray(events)) events = [events];
+    const now = Date.now();
+    this.lastMessageAt = now;
+    this.ctx.storage.put("lastMessageAt", now).catch(() => {});
     for (const event of events) {
       if (event?.T === "success" && event.msg === "authenticated") {
         const symbols = this.streamConfig?.symbols || [];
@@ -154,7 +178,7 @@ export class TradingState extends DurableObject {
         item.halted = ["2", "H", "P"].includes(String(event.sc));
         if (["3", "Q", "T"].includes(String(event.sc))) item.halted = false;
       } else if (event.T === "l") item.luld = event;
-      item.receivedAt = Date.now();
+      item.receivedAt = now;
       this.market[symbol] = item;
     }
     this.schedulePersist();
@@ -167,7 +191,7 @@ export class TradingState extends DurableObject {
       this.ctx.storage.put("market", this.market).catch(error =>
         console.error(JSON.stringify({ event: "market_persist_failed", message: error.message }))
       );
-    }, 2000);
+    }, 1500);
   }
 
   async alarm() {
