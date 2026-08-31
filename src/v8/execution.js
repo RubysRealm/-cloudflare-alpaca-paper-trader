@@ -1,4 +1,4 @@
-import { alpaca } from "./api.js";
+import { alpaca, fetchLatestQuote } from "./api.js";
 import { pct, int, num, clamp, isBotOrder } from "./config.js";
 
 export function dynamicExitParams(signal, env, side = "long") {
@@ -31,6 +31,16 @@ export function exitDecision(position, signal, env, now, etParts) {
 
 const cid = (prefix, symbol, time, tag = "") => `${prefix}-${tag}-${symbol}-${Number(time).toString(36)}`.replace(/--+/g, "-").slice(0, 48);
 
+async function freshQuote(env, symbol) {
+  const { quote } = await fetchLatestQuote(env, symbol);
+  const bid = +(quote?.bp || quote?.bid_price || 0), ask = +(quote?.ap || quote?.ask_price || 0), bidSize = +(quote?.bs || quote?.bid_size || 0), askSize = +(quote?.as || quote?.ask_size || 0);
+  const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : 0;
+  const spreadPct = mid > 0 && ask >= bid ? (ask - bid) / mid : 1;
+  const ts = Date.parse(quote?.t || quote?.timestamp || 0);
+  const quoteAgeSec = Number.isFinite(ts) ? Math.max(0, (Date.now() - ts) / 1000) : 9999;
+  return { bid, ask, bidSize, askSize, mid, spreadPct, quoteAgeSec };
+}
+
 export async function cancelStaleBotOrders(env, orders, now) {
   const age = int(env.ORDER_TIMEOUT_SECONDS, 75) * 1000, actions = [];
   for (const o of orders.filter(isBotOrder)) {
@@ -44,7 +54,14 @@ export async function cancelStaleBotOrders(env, orders, now) {
 }
 
 export async function placeLimitBuy(env, c, notional, now) {
-  const slip = pct(env.MAX_ENTRY_SLIPPAGE_PCT, 0.0008), limit = c.ask > 0 ? c.ask * (1 + slip) : c.price * (1 + slip);
+  const q = await freshQuote(env, c.symbol);
+  const maxSpread = pct(env.MAX_SPREAD_PCT, 0.0015), maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20), minQuoteSize = num(env.MIN_QUOTE_SIZE, 1);
+  if (!(q.bid > 0 && q.ask > 0)) throw new Error("fresh_quote_unavailable");
+  if (q.quoteAgeSec > maxAge) throw new Error("fresh_quote_stale");
+  if (q.spreadPct > maxSpread) throw new Error("fresh_spread_too_wide");
+  if (q.bidSize < minQuoteSize || q.askSize < minQuoteSize) throw new Error("fresh_quote_size_too_small");
+
+  const slip = pct(env.MAX_ENTRY_SLIPPAGE_PCT, 0.0008), limit = q.ask * (1 + slip);
   const qty = Math.floor((notional / limit) * 1e8) / 1e8;
   if (!(qty > 0)) throw new Error("entry_quantity_too_small");
   return alpaca(env, "/v2/orders", {
@@ -57,7 +74,9 @@ export async function placeLimitBuy(env, c, notional, now) {
 }
 
 export async function placeLimitSell(env, p, s, now, reason) {
-  const slip = pct(env.MAX_EXIT_SLIPPAGE_PCT, 0.0012), ref = s?.bid > 0 ? s.bid : +p.current_price, limit = ref * (1 - slip);
+  let q = null;
+  try { q = await freshQuote(env, p.symbol); } catch {}
+  const slip = pct(env.MAX_EXIT_SLIPPAGE_PCT, 0.0012), ref = q?.bid > 0 ? q.bid : s?.bid > 0 ? s.bid : +p.current_price, limit = ref * (1 - slip);
   const qty = Math.abs(+p.qty || 0);
   if (!(qty > 0)) throw new Error("exit_quantity_too_small");
   return alpaca(env, "/v2/orders", {
