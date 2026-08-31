@@ -4,6 +4,9 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status,
   headers: { "Content-Type": "application/json", "Cache-Control": "no-store" }
 });
+const STREAM_MAX = 10;
+const streamSymbols = input => [...new Set((input || []).map(s => String(s).toUpperCase()).filter(Boolean))].slice(0, STREAM_MAX);
+const sub = symbols => ({ trades: symbols, quotes: symbols });
 
 export class TradingState extends DurableObject {
   constructor(ctx, env) {
@@ -21,10 +24,10 @@ export class TradingState extends DurableObject {
     const url = new URL(request.url);
     if (request.method === "POST" && url.pathname === "/ensure") {
       const body = await request.json();
-      const symbols = [...new Set((body.symbols || []).map(s => String(s).toUpperCase()).filter(Boolean))].slice(0, 50);
+      const symbols = streamSymbols(body.symbols);
       const feed = String(body.feed || "iex").toLowerCase();
       await this.ensureStream(symbols, feed);
-      return json({ ok: true, connected: Boolean(this.ws && this.ws.readyState === 1), feed: this.streamConfig?.feed || feed, symbols: this.streamConfig?.symbols || symbols });
+      return json({ ok: true, connected: Boolean(this.ws && this.ws.readyState === 1), feed: this.streamConfig?.feed || feed, symbols: this.streamConfig?.symbols || symbols, streamMaxSymbols: STREAM_MAX });
     }
     if (request.method === "GET" && url.pathname === "/market") {
       if (!Object.keys(this.market).length) this.market = (await this.ctx.storage.get("market")) || {};
@@ -47,9 +50,7 @@ export class TradingState extends DurableObject {
       await this.ctx.storage.put("journals", journals);
       return json({ ok: true, entries: journals.length });
     }
-    if (request.method === "GET" && url.pathname === "/journal") {
-      return json({ journals: (await this.ctx.storage.get("journals")) || [] });
-    }
+    if (request.method === "GET" && url.pathname === "/journal") return json({ journals: (await this.ctx.storage.get("journals")) || [] });
     if (request.method === "GET" && url.pathname === "/health") {
       if (!Object.keys(this.market).length) this.market = (await this.ctx.storage.get("market")) || {};
       const lastMessageAt = Number(this.lastMessageAt || await this.ctx.storage.get("lastMessageAt") || 0);
@@ -57,6 +58,7 @@ export class TradingState extends DurableObject {
         connected: Boolean(this.ws && this.ws.readyState === 1),
         readyState: this.ws?.readyState ?? null,
         stream: this.streamConfig || await this.ctx.storage.get("streamConfig") || null,
+        streamMaxSymbols: STREAM_MAX,
         highWaterEquity: Number(await this.ctx.storage.get("highWaterEquity") || 0),
         symbolsTracked: Object.keys(this.market).length,
         lastMessageAt,
@@ -70,6 +72,7 @@ export class TradingState extends DurableObject {
   }
 
   async ensureStream(symbols, feed) {
+    symbols = streamSymbols(symbols);
     if (!symbols.length || !this.env.APCA_API_KEY_ID || !this.env.APCA_API_SECRET_KEY) return;
     const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
     const connected = Boolean(this.ws && this.ws.readyState === 1);
@@ -79,11 +82,10 @@ export class TradingState extends DurableObject {
       const add = symbols.filter(s => !old.has(s));
       const remove = [...old].filter(s => !next.has(s));
       try {
-        if (remove.length) this.ws.send(JSON.stringify({ action: "unsubscribe", trades: remove, quotes: remove, bars: remove, statuses: remove, lulds: remove }));
-        if (add.length) this.ws.send(JSON.stringify({ action: "subscribe", trades: add, quotes: add, bars: add, statuses: add, lulds: add }));
+        if (remove.length) this.ws.send(JSON.stringify({ action: "unsubscribe", ...sub(remove) }));
+        if (add.length) this.ws.send(JSON.stringify({ action: "subscribe", ...sub(add) }));
       } catch (error) {
         const diag = { at: Date.now(), event: "stream_resubscribe_failed", message: error.message };
-        console.error(JSON.stringify(diag));
         this.ctx.storage.put("lastStreamError", diag).catch(() => {});
       }
       this.streamConfig = { ...cfg, symbols, updatedAt: Date.now() };
@@ -105,88 +107,52 @@ export class TradingState extends DurableObject {
   connect() {
     const cfg = this.streamConfig;
     if (!cfg?.symbols?.length) return;
-
     let ws;
-    try {
-      ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${cfg.feed}`);
-    } catch (error) {
+    try { ws = new WebSocket(`wss://stream.data.alpaca.markets/v2/${cfg.feed}`); }
+    catch (error) {
       const diag = { at: Date.now(), event: "stream_connect_failed", message: error.message, feed: cfg.feed };
-      console.error(JSON.stringify(diag));
       this.ctx.storage.put("lastStreamError", diag).catch(() => {});
       this.ctx.storage.setAlarm(Date.now() + 30_000).catch(() => {});
       return;
     }
-
     this.ws = ws;
     ws.addEventListener("open", () => {
-      const diag = { at: Date.now(), type: "socket_open", feed: cfg.feed };
-      this.ctx.storage.put("lastControlEvent", diag).catch(() => {});
-      try {
-        ws.send(JSON.stringify({ action: "auth", key: this.env.APCA_API_KEY_ID, secret: this.env.APCA_API_SECRET_KEY }));
-      } catch (error) {
-        const err = { at: Date.now(), event: "stream_auth_send_failed", message: error.message };
-        console.error(JSON.stringify(err));
-        this.ctx.storage.put("lastStreamError", err).catch(() => {});
-      }
+      this.ctx.storage.put("lastControlEvent", { at: Date.now(), type: "socket_open", feed: cfg.feed }).catch(() => {});
+      try { ws.send(JSON.stringify({ action: "auth", key: this.env.APCA_API_KEY_ID, secret: this.env.APCA_API_SECRET_KEY })); }
+      catch (error) { this.ctx.storage.put("lastStreamError", { at: Date.now(), event: "stream_auth_send_failed", message: error.message }).catch(() => {}); }
     });
     ws.addEventListener("message", event => this.onMessage(event.data));
     ws.addEventListener("close", event => {
       if (this.ws === ws) this.ws = null;
       const diag = { at: Date.now(), code: event.code, reason: event.reason || "" };
-      console.log(JSON.stringify({ event: "stream_closed", ...diag }));
       this.ctx.storage.put("lastStreamClose", diag).catch(() => {});
-      const delay = String(event.reason || "").includes("connection_limit") ? 60_000 : 10_000;
-      this.ctx.storage.setAlarm(Date.now() + delay).catch(() => {});
+      const limited = /limit/i.test(String(event.reason || ""));
+      this.ctx.storage.setAlarm(Date.now() + (limited ? 60_000 : 10_000)).catch(() => {});
     });
-    ws.addEventListener("error", event => {
-      const diag = { at: Date.now(), event: "stream_error", message: String(event?.message || "websocket_error") };
-      console.error(JSON.stringify(diag));
-      this.ctx.storage.put("lastStreamError", diag).catch(() => {});
-    });
+    ws.addEventListener("error", event => this.ctx.storage.put("lastStreamError", { at: Date.now(), event: "stream_error", message: String(event?.message || "websocket_error") }).catch(() => {}));
   }
 
   onMessage(raw) {
     let events;
-    try { events = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)); }
-    catch { return; }
+    try { events = JSON.parse(typeof raw === "string" ? raw : new TextDecoder().decode(raw)); } catch { return; }
     if (!Array.isArray(events)) events = [events];
     const now = Date.now();
     this.lastMessageAt = now;
     this.ctx.storage.put("lastMessageAt", now).catch(() => {});
     for (const event of events) {
-      if (!event?.S) {
-        const control = { at: now, T: event?.T || null, msg: event?.msg || null, code: event?.code ?? null };
-        this.ctx.storage.put("lastControlEvent", control).catch(() => {});
-      }
+      if (!event?.S) this.ctx.storage.put("lastControlEvent", { at: now, T: event?.T || null, msg: event?.msg || null, code: event?.code ?? null }).catch(() => {});
       if (event?.T === "success" && event.msg === "authenticated") {
         this.ctx.storage.delete("lastStreamError").catch(() => {});
-        const symbols = this.streamConfig?.symbols || [];
-        this.ws?.send(JSON.stringify({
-          action: "subscribe",
-          trades: symbols,
-          quotes: symbols,
-          bars: symbols,
-          statuses: symbols,
-          lulds: symbols
-        }));
+        this.ws?.send(JSON.stringify({ action: "subscribe", ...sub(streamSymbols(this.streamConfig?.symbols)) }));
         continue;
       }
       if (event?.T === "error") {
         const diag = { at: now, code: event.code, message: event.msg || "alpaca_stream_error" };
-        console.error(JSON.stringify({ event: "alpaca_stream_error", ...diag }));
         this.ctx.storage.put("lastStreamError", diag).catch(() => {});
-
-        if (Number(event.code) === 406 || /connection limit/i.test(String(event.msg || ""))) {
-          const ws = this.ws;
-          this.ws = null;
-          try { ws?.close(1000, "connection_limit_backoff"); } catch {}
+        if ([405, 406].includes(Number(event.code)) || /limit/i.test(String(event.msg || ""))) {
+          const ws = this.ws; this.ws = null;
+          try { ws?.close(1000, "subscription_limit_backoff"); } catch {}
           this.ctx.storage.setAlarm(Date.now() + 60_000).catch(() => {});
-          continue;
-        }
-        if ((event.code === 401 || event.code === 403) && this.streamConfig?.feed !== "iex") {
-          this.streamConfig = { ...this.streamConfig, feed: "iex", fallback: true, updatedAt: Date.now() };
-          this.ctx.storage.put("streamConfig", this.streamConfig).catch(() => {});
-          try { this.ws?.close(1000, "feed_fallback"); } catch {}
         }
         continue;
       }
@@ -195,12 +161,6 @@ export class TradingState extends DurableObject {
       const item = this.market[symbol] || {};
       if (event.T === "q") item.quote = event;
       else if (event.T === "t") item.trade = event;
-      else if (event.T === "b" || event.T === "u") item.bar = event;
-      else if (event.T === "s") {
-        item.status = event;
-        item.halted = ["2", "H", "P"].includes(String(event.sc));
-        if (["3", "Q", "T"].includes(String(event.sc))) item.halted = false;
-      } else if (event.T === "l") item.luld = event;
       item.receivedAt = now;
       this.market[symbol] = item;
     }
@@ -211,16 +171,14 @@ export class TradingState extends DurableObject {
     if (this.persistTimer) return;
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
-      this.ctx.storage.put("market", this.market).catch(error =>
-        console.error(JSON.stringify({ event: "market_persist_failed", message: error.message }))
-      );
+      this.ctx.storage.put("market", this.market).catch(() => {});
     }, 1500);
   }
 
   async alarm() {
     const cfg = this.streamConfig || await this.ctx.storage.get("streamConfig");
     if (cfg?.symbols?.length) {
-      this.streamConfig = cfg;
+      this.streamConfig = { ...cfg, symbols: streamSymbols(cfg.symbols) };
       if (!this.ws || this.ws.readyState !== 1) this.connect();
       await this.ctx.storage.setAlarm(Date.now() + 8 * 60_000);
     }
