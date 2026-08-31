@@ -20,7 +20,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
       - run: npm install
       - name: Validate Worker
         run: npx wrangler deploy --dry-run --outdir dist
