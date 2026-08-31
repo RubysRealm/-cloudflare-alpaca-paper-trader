@@ -12,11 +12,14 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Check production status endpoint
+      - name: Check production status and realtime state
         shell: bash
         run: |
           set -euo pipefail
-          URL='https://cody-alpaca-paper-guard.codygiles28.workers.dev/api/status'
-          BODY="$(curl --fail --silent --show-error --max-time 20 "$URL")"
+          BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
+          BODY="$(curl --fail --silent --show-error --max-time 20 "$BASE/api/status")"
+          STATE="$(curl --fail --silent --show-error --max-time 20 "$BASE/api/state")"
           echo "PRODUCTION_STATUS=$BODY"
+          echo "PRODUCTION_STATE=$STATE"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} status=${x.status} endpoint=${x.endpoint}`); if(!String(x.strategy||"").includes("v8") || x.endpoint!=="paper") process.exit(2)' "$BODY"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`stream_connected=${Boolean(x.connected)} feed=${x.stream?.feed||"unknown"} symbols=${x.symbolsTracked||0}`)' "$STATE"
