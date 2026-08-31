@@ -1,0 +1,35 @@
+name: Validate trading worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'wrangler.toml'
+      - 'package.json'
+      - '.github/workflows/validate-worker.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Syntax check v8 modules
+        run: |
+          node --check src/v8/index.js
+          node --check src/v8/api.js
+          node --check src/v8/config.js
+          node --check src/v8/signals.js
+          node --check src/v8/performance.js
+          node --check src/v8/execution.js
+          node --check src/v8/state.js
+          node --check src/v8/state_client.js
+      - name: Wrangler dry run
+        run: npx wrangler deploy --dry-run --outdir=.wrangler-dry-run
