@@ -3,8 +3,14 @@ import { pct, int, num, clamp, isBotOrder } from "./config.js";
 
 export function dynamicExitParams(signal, env, side = "long") {
   const a = signal?.atrPct || 0.004, base = pct(env.STOP_LOSS_PCT, 0.0045), min = pct(env.MIN_STOP_LOSS_PCT, 0.003), max = pct(env.MAX_STOP_LOSS_PCT, 0.009);
-  const stop = clamp(Math.max(base, a * 0.85), min, max), rr = num(env.TARGET_R_MULTIPLE, 1.8), target = clamp(stop * rr, 0.0055, 0.02);
-  return { side, stop, target, trailTrigger: clamp(stop * 0.85, 0.0035, 0.012), trailGiveback: clamp(stop * 0.38, 0.0015, 0.005) };
+  const stop = clamp(Math.max(base, a * 0.85), min, max), rr = num(env.TARGET_R_MULTIPLE, 2.4), target = clamp(stop * rr, 0.009, 0.03);
+  return {
+    side,
+    stop,
+    target,
+    trailTrigger: clamp(Math.max(stop * 1.25, target * 0.6), 0.006, 0.018),
+    trailGiveback: clamp(stop * 0.55, 0.0025, 0.007)
+  };
 }
 
 export function exitDecision(position, signal, env, now, etParts) {
@@ -12,18 +18,29 @@ export function exitDecision(position, signal, env, now, etParts) {
   const pnl = entry > 0 ? (side === "long" ? price / entry - 1 : entry / price - 1) : 0;
   if (pnl <= -p.stop) return { exit: true, reason: "dynamic_stop", pnlPct: pnl };
   if (pnl >= p.target) return { exit: true, reason: "dynamic_target", pnlPct: pnl };
+
   if (pnl >= p.trailTrigger && signal) {
-    const fail = side === "long" ? price < signal.s5.ema9 * (1 - p.trailGiveback) : price > signal.s5.ema9 * (1 + p.trailGiveback);
+    const fail = side === "long"
+      ? price < signal.s5.ema9 * (1 - p.trailGiveback)
+      : price > signal.s5.ema9 * (1 + p.trailGiveback);
     if (fail) return { exit: true, reason: "adaptive_trail", pnlPct: pnl };
   }
-  if (pnl >= Math.max(0.002, p.stop * 0.45) && signal) {
-    const fail = side === "long" ? !signal.s5.trendSlope || price < signal.s5.ema9 : !signal.s5.downSlope || price > signal.s5.ema9;
+
+  const protectAt = Math.max(0.006, p.stop * 0.9);
+  if (pnl >= protectAt && signal) {
+    const fail = side === "long"
+      ? price < signal.s5.ema9 && !signal.s5.trendSlope
+      : price > signal.s5.ema9 && !signal.s5.downSlope;
     if (fail) return { exit: true, reason: "profit_protect", pnlPct: pnl };
   }
-  if (signal) {
-    const fail = side === "long" ? (!signal.s5.trend || price < signal.s5.vwap) : (!signal.s5.downTrend || price > signal.s5.vwap);
+
+  if (signal && pnl <= -Math.max(0.0015, p.stop * 0.35)) {
+    const fail = side === "long"
+      ? ((!signal.s5.trend && !signal.s15.trend) || (price < signal.s5.vwap && price < signal.s15.vwap))
+      : ((!signal.s5.downTrend && !signal.s15.downTrend) || (price > signal.s5.vwap && price > signal.s15.vwap));
     if (fail) return { exit: true, reason: "trend_failure", pnlPct: pnl };
   }
+
   const { hour, minute } = etParts(now);
   if (hour > 15 || (hour === 15 && minute >= 55)) return { exit: true, reason: "end_of_day_flatten", pnlPct: pnl };
   return { exit: false, reason: "hold", pnlPct: pnl };
@@ -91,6 +108,6 @@ export async function placeLimitSell(env, p, s, now, reason) {
 export function positionNotional(equity, c, env, learning, drawdownMultiplier) {
   const max = num(env.MAX_POSITION_USD, 5), cap = num(env.ORDER_NOTIONAL_USD, 5), risk = pct(env.RISK_PER_TRADE_PCT, 0.00025), stop = dynamicExitParams(c, env).stop;
   const budget = equity * risk * learning.riskMultiplier * drawdownMultiplier, riskBased = stop ? budget / stop : max;
-  const confidence = clamp((c.score - learning.scoreThreshold + 12) / 24, 0.35, 1);
+  const confidence = clamp((c.score - learning.scoreThreshold + 18) / 24, 0.7, 1);
   return clamp(Math.min(riskBased, max, cap) * confidence, 1, max);
 }
