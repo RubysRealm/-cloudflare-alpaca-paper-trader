@@ -1,5 +1,6 @@
 import stockApp, { TradingState } from "./index.js";
 import { runCryptoCycle, cryptoStatus } from "./crypto.js";
+import { runCryptoOpportunityCycle, cryptoOpportunityProbe } from "./crypto-opportunity.js";
 import { alpaca } from "./api.js";
 
 export { TradingState };
@@ -53,11 +54,19 @@ const app = {
       try { return Response.json(await cryptoLiveState(env), { headers: { "Cache-Control": "no-store" } }); }
       catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
+    if (request.method === "GET" && url.pathname === "/api/crypto/opportunity") {
+      try { return Response.json(await cryptoOpportunityProbe(env), { headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+    }
     return stockApp.fetch(request, env, ctx);
   },
   async scheduled(controller, env, ctx) {
     if (typeof stockApp.scheduled === "function") stockApp.scheduled(controller, env, ctx);
-    ctx.waitUntil(runCryptoCycle(env, controller.scheduledTime).catch(error => console.error(JSON.stringify({ event: "crypto_cycle_failed", message: error.message }))));
+    ctx.waitUntil((async () => {
+      const primary = await runCryptoCycle(env, controller.scheduledTime);
+      const bought = Array.isArray(primary?.actions) && primary.actions.some(a => a.action === "crypto_buy");
+      if (!bought) await runCryptoOpportunityCycle(env, controller.scheduledTime);
+    })().catch(error => console.error(JSON.stringify({ event: "crypto_cycle_failed", message: error.message }))));
   }
 };
 
