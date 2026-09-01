@@ -70,7 +70,7 @@ function scoreCandidate(base, h1, book) {
     (base.s5?.rsi14 ?? 50) >= 38 && (base.s5?.rsi14 ?? 50) <= 82 &&
     depth.imbalance > -0.3 && !(h1?.downTrend && score < 96)
   );
-  return { ...base, h1, ...depth, cryptoScore: score, cryptoConfirmed: confirmed };
+  return { ...base, h1, ...depth, cryptoScore: score, cryptoConfirmed: confirmed, cryptoFlow: flow, cryptoSetup: setup };
 }
 
 function regime(candidates) {
@@ -123,15 +123,32 @@ async function research(env) {
   return { assets, candidates, mode: regime(candidates) };
 }
 
+function gates(x, minScore, minVol, minDepth, maxSpread, maxAge) {
+  return {
+    confirmed: Boolean(x.cryptoConfirmed),
+    price: x.price > 0,
+    volume: x.dollarVolume >= minVol,
+    bidDepth: x.bidDepth >= minDepth,
+    askDepth: x.askDepth >= minDepth,
+    spread: x.spreadPct <= maxSpread,
+    quoteAge: x.quoteAgeSec <= maxAge,
+    score: x.cryptoScore >= minScore
+  };
+}
+
 export async function cryptoOpportunityProbe(env) {
   if (!enabled(env)) return { enabled: false, endpoint: "paper" };
   const r = await research(env), minScore = threshold(r.mode, env);
   const minVol = num(env.CRYPTO_MIN_DOLLAR_VOLUME_USD, 1000000), minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000), maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20);
-  const ranked = r.candidates.filter(x => x.cryptoConfirmed && x.price > 0 && x.dollarVolume >= minVol && x.bidDepth >= minDepth && x.askDepth >= minDepth && x.spreadPct <= maxSpread && x.quoteAgeSec <= maxAge && x.cryptoScore >= minScore).sort((a,b) => b.cryptoScore - a.cryptoScore);
+  const ranked = r.candidates.filter(x => Object.values(gates(x,minScore,minVol,minDepth,maxSpread,maxAge)).every(Boolean)).sort((a,b) => b.cryptoScore - a.cryptoScore);
+  const diagnostics = [...r.candidates].sort((a,b) => b.cryptoScore - a.cryptoScore).slice(0,12).map(x => ({
+    symbol:x.symbol, score:round(x.cryptoScore,1), baseScore:round(x.score,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), quoteAgeSec:round(x.quoteAgeSec,1), dollarVolume:round(x.dollarVolume,0), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), trendVotes:x.trendVotes, flow:Boolean(x.cryptoFlow), setup:Boolean(x.cryptoSetup), h1Trend:Boolean(x.h1?.trend), h1Down:Boolean(x.h1?.downTrend), gates:gates(x,minScore,minVol,minDepth,maxSpread,maxAge)
+  }));
   return {
     enabled: true, endpoint: "paper", market: "24x7", universeCount: r.assets.length, validSignals: r.candidates.length, mode: r.mode, threshold: minScore,
-    executableCount: ranked.length,
-    leaders: ranked.slice(0,10).map(x => ({ symbol:x.symbol, score:round(x.cryptoScore,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), dollarVolume:round(x.dollarVolume,0), trendVotes:x.trendVotes, h1Trend:Boolean(x.h1?.trend) }))
+    thresholds:{minVol,minDepth,maxSpread,maxAge}, executableCount: ranked.length,
+    leaders: ranked.slice(0,10).map(x => ({ symbol:x.symbol, score:round(x.cryptoScore,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), dollarVolume:round(x.dollarVolume,0), trendVotes:x.trendVotes, h1Trend:Boolean(x.h1?.trend) })),
+    diagnostics
   };
 }
 
@@ -150,7 +167,7 @@ export async function runCryptoOpportunityCycle(env, scheduledTime) {
   const minVol = num(env.CRYPTO_MIN_DOLLAR_VOLUME_USD,1000000), minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD,1000), maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT,0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS,20);
   const ranked = r.candidates.filter(x => {
     const k = norm(x.symbol);
-    return !held.has(k) && !open.has(k) && !cooldown.has(k) && x.cryptoConfirmed && x.price > 0 && x.dollarVolume >= minVol && x.bidDepth >= minDepth && x.askDepth >= minDepth && x.spreadPct <= maxSpread && x.quoteAgeSec <= maxAge && x.cryptoScore >= minScore;
+    return !held.has(k) && !open.has(k) && !cooldown.has(k) && Object.values(gates(x,minScore,minVol,minDepth,maxSpread,maxAge)).every(Boolean);
   }).sort((a,b) => b.cryptoScore - a.cryptoScore);
   const best = ranked[0];
   if (!best) return { status:"hold", mode:r.mode, threshold:minScore, validSignals:r.candidates.length, executableCount:0 };
