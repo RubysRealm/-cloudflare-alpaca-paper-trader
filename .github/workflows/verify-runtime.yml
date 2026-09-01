@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Wait for Cloudflare Git deployment
         run: sleep 45
-      - name: Check exact production runtime and trading state
+      - name: Check exact production runtime and direct Alpaca state
         shell: bash
         run: |
           set -euo pipefail
@@ -24,5 +24,5 @@ jobs:
           STATE="$(curl --fail --silent --show-error --max-time 20 "$BASE/api/state")"
           echo "PRODUCTION_STATUS=$BODY"
           echo "PRODUCTION_STATE=$STATE"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} status=${x.status} endpoint=${x.endpoint} feed=${x.features?.marketDataFeed} universe=${x.safeguards?.maxUniverseSymbols} positions=${x.safeguards?.maxConcurrentPositions}`); if(x.strategy!=="intraday-adaptive-v8.1.1" || x.endpoint!=="paper" || x.status!=="armed" || x.features?.dynamicScanner!==true || x.features?.marketDataFeed!=="iex" || x.safeguards?.minEntryScore!==86 || x.safeguards?.maxConcurrentPositions!==4 || x.safeguards?.maxUniverseSymbols!==40 || Math.abs((x.safeguards?.maxDailyLossPct||0)-0.015)>1e-9 || Math.abs((x.safeguards?.maxSpreadPct||0)-0.0012)>1e-9 || x.safeguards?.minDollarVolume!==75000000 || x.safeguards?.symbolCooldownMinutes!==30) process.exit(2)' "$BODY"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`state_ok=${x.persistentState!==false} stream_connected=${Boolean(x.connected)} feed=${x.stream?.feed||"unknown"} symbols=${x.symbolsTracked||0} stream_max=${x.streamMaxSymbols||"na"} message_age=${x.messageAgeSeconds ?? "na"} recent_cycles=${Array.isArray(x.recentCycles)?x.recentCycles.length:0}`); if(x.persistentState===false || !Array.isArray(x.recentCycles)) process.exit(3)' "$STATE"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} status=${x.status} endpoint=${x.endpoint} feed=${x.features?.marketDataFeed} universe=${x.safeguards?.maxUniverseSymbols} positions=${x.safeguards?.maxConcurrentPositions} stream=${x.features?.realtimeWebSocketRelay} persistent=${x.features?.persistentState}`); if(x.strategy!=="intraday-adaptive-v8.1.1" || x.endpoint!=="paper" || x.status!=="armed" || x.features?.dynamicScanner!==true || x.features?.marketDataFeed!=="iex" || x.features?.realtimeWebSocketRelay!==false || x.features?.persistentState!==false || x.safeguards?.minEntryScore!==86 || x.safeguards?.maxConcurrentPositions!==4 || x.safeguards?.maxUniverseSymbols!==40 || Math.abs((x.safeguards?.maxDailyLossPct||0)-0.015)>1e-9 || Math.abs((x.safeguards?.maxSpreadPct||0)-0.0012)>1e-9 || x.safeguards?.minDollarVolume!==75000000 || x.safeguards?.symbolCooldownMinutes!==30) process.exit(2)' "$BODY"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`mode=${x.mode} equity=${x.equity} buying_power=${x.buyingPower} positions=${x.positions} bot_orders_today=${x.botOrdersToday} last_bot_order=${x.lastBotOrderAt||"none"}`); if(x.mode!=="direct_alpaca_rest" || !(x.equity>0) || !Array.isArray(x.recentBotOrders) || x.stateError) process.exit(3)' "$STATE"
