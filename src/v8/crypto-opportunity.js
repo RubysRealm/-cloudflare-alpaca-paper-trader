@@ -106,6 +106,12 @@ function recentCooldowns(orders, now, minutes) {
   return out;
 }
 
+function positionUsd(p) {
+  const mv = Math.abs(+p?.market_value || 0);
+  if (mv > 0) return mv;
+  return Math.abs((+p?.qty || 0) * (+p?.current_price || 0));
+}
+
 async function research(env) {
   const assets = await universe(env), symbols = assets.map(a => a.symbol);
   if (!symbols.length) return { assets, candidates: [], mode: "none" };
@@ -157,10 +163,12 @@ export async function runCryptoOpportunityCycle(env, scheduledTime) {
   const [positions,openOrders,recentOrders,account] = await Promise.all([
     alpaca(env,"/v2/positions"), alpaca(env,"/v2/orders?status=open&direction=desc&nested=false"), alpaca(env,"/v2/orders?status=all&limit=500&direction=desc&nested=false"), alpaca(env,"/v2/account")
   ]);
-  const cryptoAssets = new Set(r.assets.map(a => norm(a.symbol))), held = new Set(positions.filter(p => cryptoAssets.has(norm(p.symbol))).map(p => norm(p.symbol))), open = new Set(openOrders.filter(isBotOrder).map(o => norm(o.symbol)));
+  const cryptoAssets = new Set(r.assets.map(a => norm(a.symbol)));
+  const activePositions = positions.filter(p => cryptoAssets.has(norm(p.symbol)) && positionUsd(p) > 1);
+  const held = new Set(activePositions.map(p => norm(p.symbol))), open = new Set(openOrders.filter(isBotOrder).map(o => norm(o.symbol)));
   const cooldown = recentCooldowns(recentOrders, scheduledTime, int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10));
-  const cryptoPositions = positions.filter(p => cryptoAssets.has(norm(p.symbol)) && Math.abs(+p.market_value || (+p.qty||0)*(+p.current_price||0)) > 1);
-  const maxPositions = int(env.CRYPTO_MAX_CONCURRENT_POSITIONS,4), maxExposure = num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,100000), currentExposure = cryptoPositions.reduce((a,p) => a + Math.abs(+p.market_value || (+p.qty||0)*(+p.current_price||0)),0);
+  const cryptoPositions = activePositions;
+  const maxPositions = int(env.CRYPTO_MAX_CONCURRENT_POSITIONS,4), maxExposure = num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,100000), currentExposure = cryptoPositions.reduce((a,p) => a + positionUsd(p),0);
   if (cryptoPositions.length >= maxPositions || currentExposure >= maxExposure) return { status:"capacity", mode:r.mode, positions:cryptoPositions.length, exposure:round(currentExposure,2) };
 
   const minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD,1000), maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT,0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS,20);
