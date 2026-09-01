@@ -72,16 +72,35 @@ export async function dynamicUniverse(env) {
   return [...new Set([...REGIME, ...movers, ...actives, ...CORE, ...base])].filter(allowed).slice(0, max);
 }
 
+function historyHours(timeframe) {
+  const m = String(timeframe).match(/^(\d+)Min$/i);
+  if (!m) return 168;
+  const mins = Number(m[1]);
+  if (mins <= 1) return 4;
+  if (mins <= 5) return 36;
+  return 120;
+}
+
 async function flushBarBatch(env, key, batch) {
   try {
     const symbols = [...batch.symbols];
-    const totalLimit = Math.min(10000, Math.max(1000, symbols.length * (batch.limit + 5)));
     const joined = symbols.map(encodeURIComponent).join(",");
-    const r = await marketData(env, f => `/v2/stocks/bars?symbols=${joined}&timeframe=${encodeURIComponent(batch.timeframe)}&limit=${totalLimit}&feed=${f}&adjustment=raw&sort=desc`);
-    const source = r.data?.bars || {};
+    const start = new Date(Date.now() - historyHours(batch.timeframe) * 3600000).toISOString();
+    const collected = Object.fromEntries(symbols.map(s => [s, []]));
+    let pageToken = null, feed = preferredFeed(env), pages = 0;
+    do {
+      const tokenPart = pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : "";
+      const r = await marketData(env, f => `/v2/stocks/bars?symbols=${joined}&timeframe=${encodeURIComponent(batch.timeframe)}&start=${encodeURIComponent(start)}&limit=10000&feed=${f}&adjustment=raw&sort=desc${tokenPart}`);
+      feed = r.feed;
+      const source = r.data?.bars || {};
+      for (const symbol of symbols) if (Array.isArray(source[symbol])) collected[symbol].push(...source[symbol]);
+      pageToken = r.data?.next_page_token || r.data?.nextPageToken || null;
+      pages++;
+      if (symbols.every(s => collected[s].length >= batch.limit)) break;
+    } while (pageToken && pages < 4);
     const bars = {};
-    for (const symbol of symbols) bars[symbol] = Array.isArray(source[symbol]) ? [...source[symbol]].slice(0, batch.limit).reverse() : [];
-    batch.resolve({ bars, feed: r.feed });
+    for (const symbol of symbols) bars[symbol] = collected[symbol].slice(0, batch.limit).reverse();
+    batch.resolve({ bars, feed });
   } catch (error) {
     batch.reject(error);
   } finally {
