@@ -23,6 +23,8 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: Syntax check v8 modules
         run: |
+          node --check src/v8/main.js
+          node --check src/v8/crypto.js
           node --check src/v8/index.js
           node --check src/v8/api.js
           node --check src/v8/config.js
