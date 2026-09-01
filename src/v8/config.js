@@ -1,4 +1,4 @@
-export const STRATEGY='intraday-adaptive-v8.1.1';
+export const STRATEGY='intraday-adaptive-v8.2';
 export const BOT_PREFIXES=['paper-','paper8-'];
 export const TECH=new Set(['QQQ','XLK','SMH','SOXX','NVDA','AAPL','TSLA','AMD','AMZN','META','MSFT','GOOGL','GOOG','AVGO','NFLX','CRM','ORCL','INTC','MU','QCOM','ARM','PLTR']);
 export const num=(v,f)=>{const n=Number(v);return Number.isFinite(n)&&n>0?n:f};
