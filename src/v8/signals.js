@@ -38,6 +38,10 @@ export function combineSignals(symbol, s1, s5, s15, snap) {
   const sa = s1.downTrend && s5.downTrend && s15.downTrend && s5.downSlope && s15.downSlope && s5.belowVwap;
   const hr = s5.rsi14 >= 52 && s5.rsi14 <= 72, hs = s5.rsi14 >= 28 && s5.rsi14 <= 48, vc = s5.relVolume >= 1.1, sv = s5.atrPct >= 0.001 && s5.atrPct <= 0.022;
   const ne = last <= Math.max(s5.vwap, s5.ema9) * 1.0065, nes = last >= Math.min(s5.vwap, s5.ema9) * 0.9935, ch = s1.choppy && s5.choppy;
+  const continuation = !halted && !nearLuld && la && sv && !ch && ne &&
+    s5.relVolume >= 0.25 && s5.rsi14 >= 48 && s5.rsi14 <= 78 &&
+    s5.trendSlope && s15.trendSlope && (s1.ret3 > 0 || s5.ret3 > 0) &&
+    s1.ret3 < 0.018 && s5.ret3 < 0.03;
   const volumeBoost = Math.min(12, Math.max(0, (s5.relVolume - 1.1) * 7));
   const longVelocity = s1.ret3 > 0 && s5.ret3 > 0 && s15.ret3 > 0 ? 10 : (s1.ret3 > 0 && s5.ret3 > 0 ? 5 : 0);
   const shortVelocity = s1.ret3 < 0 && s5.ret3 < 0 && s15.ret3 < 0 ? 10 : (s1.ret3 < 0 && s5.ret3 < 0 ? 5 : 0);
@@ -55,8 +59,8 @@ export function combineSignals(symbol, s1, s5, s15, snap) {
   return {
     symbol, valid: true, price: last, bid, ask, bidSize, askSize, dollarVolume, mid, spreadPct: spread, quoteAgeSec: qa, tradeAgeSec: ta,
     halted, nearLuld, limitUp, limitDown, atrPct: s5.atrPct, rvol: s5.relVolume, rsi: s5.rsi14,
-    longAligned: la, shortAligned: sa,
-    longConfirmed: !halted && !nearLuld && la && hr && vc && sv && !ch && ne && (s5.pullback || (s5.breakout && s5.momentum)),
+    longAligned: la, shortAligned: sa, longContinuation: continuation,
+    longConfirmed: (!halted && !nearLuld && la && hr && vc && sv && !ch && ne && (s5.pullback || (s5.breakout && s5.momentum))) || continuation,
     shortConfirmed: !halted && !nearLuld && sa && hs && vc && sv && !ch && nes && (s5.shortPullback || (s5.breakdown && s5.downsideMomentum)),
     score, shortScore: ss, chop: ch, s1, s5, s15
   };
