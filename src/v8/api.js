@@ -10,6 +10,7 @@ const DEFAULT_APPROVED = [
 const REGIME = ["SPY","QQQ","IWM"];
 const CORE = ["DIA","SH","PSQ","RWM","XLK","XLF","XLE","SMH","TLT","GLD"];
 const NORMAL_SYMBOL = /^[A-Z]{1,5}$/;
+const barBatches = new Map();
 
 export async function alpaca(env, path, init = {}) {
   const r = await fetch(`${PAPER_API}${path}`, { ...init, headers: { ...headers(env), ...(init.headers || {}) } });
@@ -71,9 +72,36 @@ export async function dynamicUniverse(env) {
   return [...new Set([...REGIME, ...movers, ...actives, ...CORE, ...base])].filter(allowed).slice(0, max);
 }
 
+async function flushBarBatch(env, key, batch) {
+  try {
+    const symbols = [...batch.symbols];
+    const totalLimit = Math.min(10000, Math.max(1000, symbols.length * (batch.limit + 5)));
+    const joined = symbols.map(encodeURIComponent).join(",");
+    const r = await marketData(env, f => `/v2/stocks/bars?symbols=${joined}&timeframe=${encodeURIComponent(batch.timeframe)}&limit=${totalLimit}&feed=${f}&adjustment=raw&sort=desc`);
+    const source = r.data?.bars || {};
+    const bars = {};
+    for (const symbol of symbols) bars[symbol] = Array.isArray(source[symbol]) ? [...source[symbol]].slice(0, batch.limit).reverse() : [];
+    batch.resolve({ bars, feed: r.feed });
+  } catch (error) {
+    batch.reject(error);
+  } finally {
+    barBatches.delete(key);
+  }
+}
+
 export async function fetchBars(env, symbol, timeframe, limit) {
-  const r = await marketData(env, f => `/v2/stocks/${encodeURIComponent(symbol)}/bars?timeframe=${timeframe}&limit=${limit}&feed=${f}&adjustment=raw&sort=desc`);
-  return { bars: Array.isArray(r.data?.bars) ? [...r.data.bars].reverse() : [], feed: r.feed };
+  const key = `${preferredFeed(env)}:${timeframe}:${limit}`;
+  let batch = barBatches.get(key);
+  if (!batch) {
+    let resolve, reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    batch = { symbols: new Set(), timeframe, limit, promise, resolve, reject };
+    barBatches.set(key, batch);
+    Promise.resolve().then(() => flushBarBatch(env, key, batch));
+  }
+  batch.symbols.add(String(symbol).toUpperCase());
+  const result = await batch.promise;
+  return { bars: result.bars[String(symbol).toUpperCase()] || [], feed: result.feed };
 }
 
 export async function fetchSnapshots(env, symbols) {
