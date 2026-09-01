@@ -20,5 +20,5 @@ jobs:
           echo "CRYPTO_STATUS=$STATUS"
           echo "CRYPTO_OPPORTUNITY=$OPP"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`build=${x.cryptoEntryBuild} positions=${x.cryptoPositionCount} orders=${x.cryptoBotOrderCount} last=${x.lastCryptoBotOrderAt}`)' "$LIVE"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`build=${x.cryptoEntryBuild} valid=${x.validSignals} executable=${x.executableCount} minVol=${x.thresholds?.minVol} mode=${x.mode} leaders=${JSON.stringify(x.leaders||[])}`)' "$OPP"
-          echo "recheck=2026-09-01-user-confirms-no-trades"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`build=${x.cryptoEntryBuild} valid=${x.validSignals} executable=${x.executableCount} minVol=${x.thresholds?.minVol} volumeGate=${x.thresholds?.volumeGate} mode=${x.mode} leaders=${JSON.stringify(x.leaders||[])}`)' "$OPP"
+          echo "recheck=2026-09-01-after-explicit-volume-gate-removal"
