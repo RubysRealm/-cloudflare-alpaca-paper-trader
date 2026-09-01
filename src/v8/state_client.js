@@ -62,5 +62,18 @@ export async function persistJournal(env, journal) {
 }
 
 export async function stateHealth(env) {
-  return call(env, "/health");
+  if (!env.TRADING_STATE) return { connected: false, persistentState: false, stateError: "missing_TRADING_STATE_binding" };
+  const s = stub(env);
+  if (!s) return { connected: false, persistentState: false, stateError: "unable_to_create_TRADING_STATE_stub" };
+  try {
+    const r = await s.fetch("https://state.internal/health", { headers: { "Content-Type": "application/json" } });
+    if (!r.ok) {
+      let detail = "";
+      try { detail = (await r.text()).slice(0, 300); } catch {}
+      return { connected: false, persistentState: false, stateError: `state_http_${r.status}`, stateDetail: detail };
+    }
+    return await r.json();
+  } catch (error) {
+    return { connected: false, persistentState: false, stateError: String(error?.message || error).slice(0, 500) };
+  }
 }
