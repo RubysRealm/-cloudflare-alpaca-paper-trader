@@ -54,6 +54,19 @@ export class TradingState extends DurableObject {
     if (request.method === "GET" && url.pathname === "/health") {
       if (!Object.keys(this.market).length) this.market = (await this.ctx.storage.get("market")) || {};
       const lastMessageAt = Number(this.lastMessageAt || await this.ctx.storage.get("lastMessageAt") || 0);
+      const journals = (await this.ctx.storage.get("journals")) || [];
+      const recentCycles = journals.slice(-5).map(j => ({
+        ts: j.ts || null,
+        status: Array.isArray(j.actions) && j.actions.length ? "acted" : "hold",
+        actions: j.actions || [],
+        daily: j.daily || null,
+        risk: j.risk || null,
+        regime: j.regime || null,
+        learning: j.learning || null,
+        leaders: (j.leaders || []).slice(0, 5),
+        universeCount: Array.isArray(j.universe) ? j.universe.length : 0,
+        discordConfigured: Boolean(j.externalSignals?.discordConfigured)
+      }));
       return json({
         connected: Boolean(this.ws && this.ws.readyState === 1),
         readyState: this.ws?.readyState ?? null,
@@ -65,7 +78,8 @@ export class TradingState extends DurableObject {
         messageAgeSeconds: lastMessageAt ? Math.max(0, Math.round((Date.now() - lastMessageAt) / 1000)) : null,
         lastControlEvent: await this.ctx.storage.get("lastControlEvent") || null,
         lastStreamError: await this.ctx.storage.get("lastStreamError") || null,
-        lastStreamClose: await this.ctx.storage.get("lastStreamClose") || null
+        lastStreamClose: await this.ctx.storage.get("lastStreamClose") || null,
+        recentCycles
       });
     }
     return json({ error: "not_found" }, 404);
