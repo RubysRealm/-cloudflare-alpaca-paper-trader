@@ -3,7 +3,7 @@ import { timeframeSignal, combineSignals } from "./signals.js";
 import { adaptiveLearning } from "./performance.js";
 import { num, pct, int, clamp, round, etDateKey } from "./config.js";
 
-export const CRYPTO_STRATEGY = "crypto-profitability-v1";
+export const CRYPTO_STRATEGY = "crypto-professional-v2";
 const CRYPTO_PREFIX = "papercrypto-";
 const FALLBACK = ["BTC/USD","ETH/USD","SOL/USD","DOGE/USD","LTC/USD","AVAX/USD","LINK/USD","BCH/USD","UNI/USD","AAVE/USD"];
 let universeCache = { at: 0, assets: [], source: "none" };
@@ -29,7 +29,7 @@ export async function cryptoUniverse(env) {
   } catch (error) {
     console.log(JSON.stringify({ event: "crypto_universe_degraded", message: error.message }));
   }
-  const assets = String(env.CRYPTO_SYMBOLS || FALLBACK.join(",")).split(",").map(symbol => ({ symbol: symbol.trim().toUpperCase(), tradable: true, fractionable: true, status: "active", min_trade_increment: "0.00000001" })).filter(a => a.symbol);
+  const assets = String(env.CRYPTO_SYMBOLS || FALLBACK.join(",")).split(",").map(symbol => ({ symbol: symbol.trim().toUpperCase(), tradable: true, fractionable: true, status: "active", min_trade_increment: "0.00000001", price_increment: "0.00000001" })).filter(a => a.symbol);
   universeCache = { at: Date.now(), assets, source: "fallback" };
   return universeCache;
 }
@@ -84,7 +84,7 @@ function bookMetrics(book) {
   const row = x => Array.isArray(x)
     ? { price: +(x[0] || 0), size: +(x[1] || 0) }
     : { price: +(x?.p ?? x?.price ?? 0), size: +(x?.s ?? x?.size ?? 0) };
-  const bids = (book?.b || book?.bids || []).slice(0, 8).map(row), asks = (book?.a || book?.asks || []).slice(0, 8).map(row);
+  const bids = (book?.b || book?.bids || []).slice(0, 10).map(row), asks = (book?.a || book?.asks || []).slice(0, 10).map(row);
   const bidUsd = bids.reduce((a, x) => a + x.price * x.size, 0), askUsd = asks.reduce((a, x) => a + x.price * x.size, 0), total = bidUsd + askUsd;
   return { bidDepthUsd: bidUsd, askDepthUsd: askUsd, imbalance: total > 0 ? (bidUsd - askUsd) / total : 0 };
 }
@@ -92,21 +92,31 @@ function bookMetrics(book) {
 function enrichResearch(base, h1, h4, book) {
   if (!base?.valid) return base;
   const depth = bookMetrics(book);
-  const higherBoost = (h1?.trend ? 8 : h1?.downTrend ? -7 : 0) + (h4?.trend ? 6 : h4?.downTrend ? -6 : 0) + (h1?.trendSlope ? 3 : 0) + (h4?.trendSlope ? 2 : 0);
-  const bookBoost = depth.imbalance >= 0.2 ? 9 : depth.imbalance >= 0.1 ? 5 : depth.imbalance <= -0.2 ? -9 : depth.imbalance <= -0.1 ? -5 : 0;
+  const flow = Boolean((base.s1?.ret1 > 0 && base.s1?.ret3 > 0) || (base.s5?.ret1 > 0 && base.s5?.ret3 > 0) || (base.s1?.ret1 > 0 && base.s5?.ret1 > 0));
+  const setup = Boolean(base.s1?.momentum || base.s1?.breakout || base.s5?.momentum || base.s5?.breakout || base.s5?.pullback || (base.trendVotes >= 5 && flow));
+  const higherBoost = (h1?.trend ? 8 : h1?.downTrend ? -8 : 0) + (h4?.trend ? 7 : h4?.downTrend ? -7 : 0) + (h1?.trendSlope ? 3 : 0) + (h4?.trendSlope ? 2 : 0);
+  const bookBoost = depth.imbalance >= 0.2 ? 9 : depth.imbalance >= 0.1 ? 5 : depth.imbalance <= -0.2 ? -10 : depth.imbalance <= -0.1 ? -5 : 0;
+  const velocityBoost = clamp(((base.s1?.ret3 || 0) * 700) + ((base.s5?.ret3 || 0) * 350), -10, 14);
   const higherBearConflict = Boolean(h1?.downTrend && h4?.downTrend);
-  const score = base.score + higherBoost + bookBoost;
+  const score = base.score + higherBoost + bookBoost + velocityBoost;
+  const cryptoConfirmed = Boolean(
+    !base.halted && !base.nearLuld && !base.chop && flow && setup && base.trendVotes >= 4 &&
+    (base.s5?.rsi14 ?? 50) >= 40 && (base.s5?.rsi14 ?? 50) <= 80 &&
+    depth.imbalance > -0.25 && !higherBearConflict
+  );
   return {
     ...base,
     score,
-    longConfirmed: Boolean(base.longConfirmed && !higherBearConflict && depth.imbalance > -0.4),
+    longConfirmed: cryptoConfirmed,
+    cryptoFlow: flow,
+    cryptoSetup: setup,
     h1,
     h4,
     higherTimeframeAligned: Boolean(h1?.trend && h4?.trend),
     bookImbalance: depth.imbalance,
     bidDepthUsd: depth.bidDepthUsd,
     askDepthUsd: depth.askDepthUsd,
-    researchBoost: higherBoost + bookBoost
+    researchBoost: higherBoost + bookBoost + velocityBoost
   };
 }
 
@@ -134,6 +144,19 @@ function exitParams(signal, env) {
   const base = pct(env.CRYPTO_STOP_LOSS_PCT, 0.008), min = pct(env.CRYPTO_MIN_STOP_LOSS_PCT, 0.005), max = pct(env.CRYPTO_MAX_STOP_LOSS_PCT, 0.02);
   const stop = clamp(Math.max(base, a * 0.9), min, max), rr = num(env.CRYPTO_TARGET_R_MULTIPLE, 2.4), target = clamp(stop * rr, 0.012, 0.06);
   return { stop, target, trailTrigger: clamp(Math.max(stop * 1.15, target * 0.55), 0.008, 0.035), trailGiveback: clamp(stop * 0.5, 0.003, 0.012) };
+}
+
+function entryEconomics(signal, env) {
+  const target = exitParams(signal, env).target;
+  const fee = pct(env.CRYPTO_TAKER_FEE_PCT, 0.0025);
+  const entrySlip = pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT, 0.0015);
+  const exitSlip = pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT, 0.0015);
+  const roundTripCost = fee * 2 + Math.max(0, signal?.spreadPct || 0) + entrySlip + exitSlip;
+  const netTarget = target - roundTripCost;
+  const ratio = roundTripCost > 0 ? target / roundTripCost : 99;
+  const minNet = pct(env.CRYPTO_MIN_EXPECTED_NET_EDGE_PCT, 0.004);
+  const minRatio = num(env.CRYPTO_MIN_REWARD_TO_COST, 1.5);
+  return { target, roundTripCost, netTarget, ratio, ok: netTarget >= minNet && ratio >= minRatio };
 }
 
 function cryptoExitDecision(position, signal, env, regime) {
@@ -176,7 +199,7 @@ function cryptoPerformance(orders) {
     if (o.side === "buy") { x.cost += q * p; x.qty += q; continue; }
     if (x.qty <= 0) continue;
     const sold = Math.min(q, x.qty), avg = x.cost / x.qty, pnl = sold * (p - avg);
-    realizedPnl += pnl; pnls.push(pnl); trades.push({ pnl, at: o.filled_at }); x.qty -= sold; x.cost -= sold * avg;
+    realizedPnl += pnl; pnls.push(pnl); trades.push({ pnl, at: o.filled_at, symbol: key }); x.qty -= sold; x.cost -= sold * avg;
     if (pnl > 0) { wins++; grossWin += pnl; consecLoss = 0; } else if (pnl < 0) { losses++; grossLoss += Math.abs(pnl); consecLoss++; maxConsecLoss = Math.max(maxConsecLoss, consecLoss); }
   }
   const count = pnls.length, expectancy = count ? realizedPnl / count : 0, profitFactor = grossLoss ? grossWin / grossLoss : grossWin > 0 ? 99 : 0;
@@ -191,8 +214,19 @@ function formatSellQty(qty, asset) {
   return Math.max(0, value).toFixed(Math.min(12, Math.max(0, decimals)));
 }
 
-async function placeCryptoBuy(env, candidate, notional, now) {
-  return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: candidate.symbol, notional: round(notional, 2).toFixed(2), side: "buy", type: "market", time_in_force: "gtc", client_order_id: cid("buy", candidate.symbol, now, candidate.s5?.pullback ? "pb" : "bo") }) });
+function formatLimitPrice(price, asset) {
+  const inc = Math.max(1e-12, +(asset?.price_increment || 0.00000001));
+  const units = Math.ceil(price / inc), value = units * inc;
+  const text = String(asset?.price_increment || "0.00000001");
+  const decimals = text.includes(".") ? text.split(".")[1].replace(/0+$/, "").length || text.split(".")[1].length : 8;
+  return Math.max(inc, value).toFixed(Math.min(12, Math.max(0, decimals)));
+}
+
+async function placeCryptoBuy(env, candidate, asset, notional, now) {
+  if (!(candidate.ask > 0)) throw new Error("crypto_entry_missing_ask");
+  const maxSlip = pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT, 0.0015);
+  const limitPrice = formatLimitPrice(candidate.ask * (1 + maxSlip), asset);
+  return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: candidate.symbol, notional: round(notional, 2).toFixed(2), side: "buy", type: "limit", limit_price: limitPrice, time_in_force: "ioc", client_order_id: cid("buy", candidate.symbol, now, candidate.s5?.pullback ? "pb" : "bo") }) });
 }
 
 async function placeCryptoSell(env, position, asset, signal, now, reason) {
@@ -204,8 +238,9 @@ async function placeCryptoSell(env, position, asset, signal, now, reason) {
 function positionNotional(equity, candidate, env, learning) {
   const max = num(env.CRYPTO_MAX_POSITION_USD, 15000), cap = num(env.CRYPTO_ORDER_NOTIONAL_USD, 15000), risk = pct(env.CRYPTO_RISK_PER_TRADE_PCT, 0.0035), stop = exitParams(candidate, env).stop;
   const budget = equity * risk * learning.riskMultiplier, riskBased = stop ? budget / stop : max;
-  const confidence = clamp((candidate.score - learning.scoreThreshold + 18) / 24, 0.7, 1);
-  return clamp(Math.min(riskBased, max, cap) * confidence, num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD, 25), max);
+  const confidence = clamp((candidate.score - learning.scoreThreshold + 18) / 24, 0.65, 1);
+  const validationCap = learning.state === "learning_sample" ? equity * 0.05 : learning.riskMultiplier < 0.6 ? equity * 0.035 : max;
+  return clamp(Math.min(riskBased, max, cap, validationCap) * confidence, num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD, 25), max);
 }
 
 function recentCryptoCooldowns(orders, now, minutes) {
@@ -255,7 +290,7 @@ export async function runCryptoCycle(env, scheduledTime) {
     const key = norm(p.symbol), lot = lots[key];
     if (!lot || !(lot.qty > 1e-10)) return [];
     const actual = Math.abs(+p.qty || 0), qty = Math.min(actual, lot.qty), signal = signalByNorm.get(key);
-    if (!(qty > 1e-10)) return [];
+    if (!(qty > 1e-10) || Math.abs(qty * (+p.current_price || signal?.price || 0)) <= 1) return [];
     return [{ ...p, qty: String(qty), avg_entry_price: String(lot.avgEntry || p.avg_entry_price), current_price: String(signal?.price || p.current_price), _key: key }];
   });
 
@@ -276,11 +311,12 @@ export async function runCryptoCycle(env, scheduledTime) {
   const dailyLossGuard = dailyPnl <= -(equity * pct(env.CRYPTO_MAX_DAILY_LOSS_PCT, 0.0125)), lossCountGuard = dailyLosses >= int(env.CRYPTO_MAX_DAILY_LOSING_EXITS, 4), consecutiveLossGuard = maxConsec >= int(env.CRYPTO_MAX_CONSECUTIVE_LOSSES, 3);
   const cooldowns = recentCryptoCooldowns(recentOrders, scheduledTime, int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10));
 
-  const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20), minDollarVolume = 0, minQuoteUsd = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000);
+  const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20), minQuoteUsd = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000);
   const occupied = new Set(botPositions.map(p => p._key));
   const ranked = signals.filter(s => {
-    const key = norm(s.symbol), bidNotional = s.bid * s.bidSize, askNotional = s.ask * s.askSize;
-    return String(s.symbol).toUpperCase().endsWith("/USD") && !occupied.has(key) && !cryptoOpen.has(key) && !cooldowns.has(key) && s.longConfirmed && !s.chop && s.price > 0 && s.dollarVolume >= minDollarVolume && bidNotional >= minQuoteUsd && askNotional >= minQuoteUsd && s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge;
+    const key = norm(s.symbol), bidNotional = s.bid * s.bidSize, askNotional = s.ask * s.askSize, economics = entryEconomics(s, env);
+    s.entryEconomics = economics;
+    return String(s.symbol).toUpperCase().endsWith("/USD") && !occupied.has(key) && !cryptoOpen.has(key) && !cooldowns.has(key) && s.longConfirmed && !s.chop && s.price > 0 && bidNotional >= minQuoteUsd && askNotional >= minQuoteUsd && s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge && economics.ok;
   }).sort((a,b) => b.score - a.score);
 
   const maxPositions = int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotal = num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), maxNew = int(env.CRYPTO_MAX_NEW_ENTRIES_PER_CYCLE, 1);
@@ -295,13 +331,13 @@ export async function runCryptoCycle(env, scheduledTime) {
     const notional = Math.min(positionNotional(equity, candidate, env, learning), remaining, cashLike);
     if (notional < num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD, 25)) continue;
     try {
-      await placeCryptoBuy(env, candidate, notional, scheduledTime);
-      actions.push({ action: "crypto_buy", symbol: candidate.symbol, reason: "ranked_edge", score: round(candidate.score, 1), threshold: round(threshold, 1), regime: regime.mode, spreadPct: round(candidate.spreadPct, 5), researchBoost: round(candidate.researchBoost || 0, 1), bookImbalance: round(candidate.bookImbalance || 0, 3), notional: round(notional, 2) });
+      const order = await placeCryptoBuy(env, candidate, assetByNorm.get(norm(candidate.symbol)), notional, scheduledTime);
+      actions.push({ action: "crypto_buy", symbol: candidate.symbol, reason: "cost_aware_ranked_edge", score: round(candidate.score, 1), threshold: round(threshold, 1), regime: regime.mode, spreadPct: round(candidate.spreadPct, 5), researchBoost: round(candidate.researchBoost || 0, 1), bookImbalance: round(candidate.bookImbalance || 0, 3), expectedNetEdgePct: round(candidate.entryEconomics?.netTarget || 0, 5), rewardToCost: round(candidate.entryEconomics?.ratio || 0, 2), notional: round(notional, 2), orderType: order?.type || "limit", orderStatus: order?.status || null, limitPrice: +(order?.limit_price || 0) });
       slots--; remaining -= notional; newEntries++;
     } catch (error) { console.log(JSON.stringify({ event: "crypto_entry_failed", symbol: candidate.symbol, message: error.message })); }
   }
 
-  const result = { status: actions.length ? "acted" : "hold", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: symbols.length, allActiveTradablePairs: true, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true }, regime, learning, daily: { pnl: round(dailyPnl, 2), losses: dailyLosses, maxConsecLoss: maxConsec }, risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal, dailyLossGuard, lossCountGuard, consecutiveLossGuard }, actions, leaders: ranked.slice(0,8).map(s => ({ symbol: s.symbol, score: round(s.score,1), spreadPct: round(s.spreadPct,5), rvol: round(s.rvol,2), dollarVolume: round(s.dollarVolume,0), bookImbalance: round(s.bookImbalance || 0,3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), researchBoost: round(s.researchBoost || 0,1) })) };
+  const result = { status: actions.length ? "acted" : "hold", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: symbols.length, allActiveTradablePairs: true, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true, singleEngineOwnership: true, priceProtectedIocEntries: true, costAwareEntries: true }, regime, learning, performance: { realizedPnl: round(perf.realizedPnl, 2), trades: perf.trades, wins: perf.wins, losses: perf.losses, winRate: round(perf.winRate, 4), profitFactor: round(perf.profitFactor, 3), expectancy: round(perf.expectancy, 2) }, daily: { pnl: round(dailyPnl, 2), losses: dailyLosses, maxConsecLoss: maxConsec }, risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal, dailyLossGuard, lossCountGuard, consecutiveLossGuard, canRisk }, actions, leaders: ranked.slice(0,8).map(s => ({ symbol: s.symbol, score: round(s.score,1), spreadPct: round(s.spreadPct,5), rvol: round(s.rvol,2), bookImbalance: round(s.bookImbalance || 0,3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), expectedNetEdgePct: round(s.entryEconomics?.netTarget || 0,5), rewardToCost: round(s.entryEconomics?.ratio || 0,2), researchBoost: round(s.researchBoost || 0,1) })) };
   console.log(JSON.stringify({ event: "crypto_cycle_complete", ...result }));
   return result;
 }
@@ -315,5 +351,5 @@ export async function cryptoStatus(env) {
   try { account = await alpaca(env, "/v2/account"); } catch {}
   const quoteMarkets = [...new Set(u.assets.map(a => String(a.symbol || "").split("/")[1]).filter(Boolean))].sort();
   const uniqueCryptoAssets = new Set(u.assets.map(a => String(a.symbol || "").split("/")[0]).filter(Boolean)).size;
-  return { strategy: CRYPTO_STRATEGY, enabled: cryptoEnabled(env), endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: u.assets.length, uniqueCryptoAssets, quoteMarkets, allActiveTradablePairs: true, sampleSymbols: symbols, marketDataReachable, orderBookReachable, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true }, cryptoAccountStatus: account.crypto_status || null, maxConcurrentPositions: int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 82), targetRMultiple: num(env.CRYPTO_TARGET_R_MULTIPLE, 2.4), symbolCooldownMinutes: int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10) };
+  return { strategy: CRYPTO_STRATEGY, enabled: cryptoEnabled(env), endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: u.assets.length, uniqueCryptoAssets, quoteMarkets, allActiveTradablePairs: true, sampleSymbols: symbols, marketDataReachable, orderBookReachable, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true, singleEngineOwnership: true, priceProtectedIocEntries: true, costAwareEntries: true }, cryptoAccountStatus: account.crypto_status || null, maxConcurrentPositions: int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 82), targetRMultiple: num(env.CRYPTO_TARGET_R_MULTIPLE, 2.4), symbolCooldownMinutes: int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10) };
 }
