@@ -5,10 +5,10 @@ import { alpaca } from "./api.js";
 
 export { TradingState };
 
+const CRYPTO_ENTRY_BUILD = "crypto-entry-fix-v2";
+
 function cryptoExecutionEnv(env) {
-  const scoped = Object.create(env);
-  scoped.CRYPTO_MIN_DOLLAR_VOLUME_USD = "0";
-  return scoped;
+  return { ...env, CRYPTO_MIN_DOLLAR_VOLUME_USD: "0" };
 }
 
 async function cryptoLiveState(env) {
@@ -29,6 +29,7 @@ async function cryptoLiveState(env) {
   }));
   return {
     endpoint: "paper",
+    cryptoEntryBuild: CRYPTO_ENTRY_BUILD,
     cryptoAccountStatus: account?.crypto_status || null,
     cryptoPositionCount: cryptoPositions.length,
     cryptoPositions,
@@ -53,16 +54,16 @@ const app = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/crypto/status") {
-      try { return Response.json(await cryptoStatus(env), { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ strategy: "crypto-profitability-v1", enabled: false, endpoint: "paper", market: "24x7", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+      try { return Response.json({ ...(await cryptoStatus(env)), cryptoEntryBuild: CRYPTO_ENTRY_BUILD }, { headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ strategy: "crypto-profitability-v1", enabled: false, endpoint: "paper", market: "24x7", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     if (request.method === "GET" && url.pathname === "/api/crypto/live") {
       try { return Response.json(await cryptoLiveState(env), { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     if (request.method === "GET" && url.pathname === "/api/crypto/opportunity") {
-      try { return Response.json(await cryptoOpportunityProbe(cryptoExecutionEnv(env)), { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+      try { return Response.json({ ...(await cryptoOpportunityProbe(cryptoExecutionEnv(env))), cryptoEntryBuild: CRYPTO_ENTRY_BUILD }, { headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     return stockApp.fetch(request, env, ctx);
   },
@@ -72,7 +73,7 @@ const app = {
       const primary = await runCryptoCycle(env, controller.scheduledTime);
       const bought = Array.isArray(primary?.actions) && primary.actions.some(a => a.action === "crypto_buy");
       if (!bought) await runCryptoOpportunityCycle(cryptoExecutionEnv(env), controller.scheduledTime);
-    })().catch(error => console.error(JSON.stringify({ event: "crypto_cycle_failed", message: error.message }))));
+    })().catch(error => console.error(JSON.stringify({ event: "crypto_cycle_failed", build: CRYPTO_ENTRY_BUILD, message: error.message }))));
   }
 };
 
