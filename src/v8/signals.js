@@ -5,7 +5,7 @@ const sd = a => { if (a.length < 2) return 0; const m = avg(a); return Math.sqrt
 const ema = (a, p) => { if (!a.length) return 0; const k = 2 / (p + 1); let e = a[0]; for (let i = 1; i < a.length; i++) e = a[i] * k + e * (1 - k); return e; };
 const rsi = (a, p = 14) => { if (a.length <= p) return 50; let g = 0, l = 0; for (let i = a.length - p; i < a.length; i++) { const d = a[i] - a[i - 1]; d >= 0 ? g += d : l -= d; } if (!l) return 100; const r = g / l; return 100 - 100 / (1 + r); };
 const atr = (b, p = 14) => { if (!b || b.length < p + 1) return 0; const t = []; for (let i = b.length - p; i < b.length; i++) { const h = +b[i].h, l = +b[i].l, pc = +b[i - 1].c; t.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc))); } return avg(t); };
-const INVERSE = new Set(["SH", "PSQ", "RWM"]);
+const INVERSE = new Set(["SH", "PSQ", "RWM", "SQQQ", "SPXU", "SOXS", "TZA"]);
 
 export function timeframeSignal(symbol, bars) {
   const b = (bars || []).filter(x => [x.c, x.h, x.l, x.v].every(v => Number.isFinite(+v)));
@@ -34,35 +34,66 @@ export function combineSignals(symbol, s1, s5, s15, snap) {
   const qa = Number.isFinite(qt) ? (now - qt) / 1000 : 9999, ta = Number.isFinite(tt) ? (now - tt) / 1000 : 9999;
   const halted = Boolean(snap?.realtimeHalted), luld = snap?.realtimeLuld || null, limitUp = +(luld?.u || 0), limitDown = +(luld?.d || 0);
   const nearLuld = Boolean((limitUp > 0 && last >= limitUp * 0.995) || (limitDown > 0 && last <= limitDown * 1.005));
+
   const la = s1.trend && s5.trend && s15.trend && s5.trendSlope && s15.trendSlope && s5.aboveVwap;
   const sa = s1.downTrend && s5.downTrend && s15.downTrend && s5.downSlope && s15.downSlope && s5.belowVwap;
-  const hr = s5.rsi14 >= 52 && s5.rsi14 <= 72, hs = s5.rsi14 >= 28 && s5.rsi14 <= 48, vc = s5.relVolume >= 1.1, sv = s5.atrPct >= 0.001 && s5.atrPct <= 0.022;
-  const ne = last <= Math.max(s5.vwap, s5.ema9) * 1.0065, nes = last >= Math.min(s5.vwap, s5.ema9) * 0.9935, ch = s1.choppy && s5.choppy;
-  const continuation = !halted && !nearLuld && la && sv && !ch && ne &&
-    s5.relVolume >= 0.25 && s5.rsi14 >= 48 && s5.rsi14 <= 78 &&
-    s5.trendSlope && s15.trendSlope && (s1.ret3 > 0 || s5.ret3 > 0) &&
-    s1.ret3 < 0.018 && s5.ret3 < 0.03;
-  const volumeBoost = Math.min(12, Math.max(0, (s5.relVolume - 1.1) * 7));
-  const longVelocity = s1.ret3 > 0 && s5.ret3 > 0 && s15.ret3 > 0 ? 10 : (s1.ret3 > 0 && s5.ret3 > 0 ? 5 : 0);
-  const shortVelocity = s1.ret3 < 0 && s5.ret3 < 0 && s15.ret3 < 0 ? 10 : (s1.ret3 < 0 && s5.ret3 < 0 ? 5 : 0);
-  const longAcceleration = s1.ret1 > 0 && s1.ret3 > 0 && s5.ret1 > 0 ? 5 : 0;
-  const shortAcceleration = s1.ret1 < 0 && s1.ret3 < 0 && s5.ret1 < 0 ? 5 : 0;
-  const longChasePenalty = s1.ret3 > 0.018 || s5.ret3 > 0.03 ? 18 : s1.ret1 > 0.01 ? 10 : 0;
-  const shortChasePenalty = s1.ret3 < -0.018 || s5.ret3 < -0.03 ? 18 : s1.ret1 < -0.01 ? 10 : 0;
+  const sv = s5.atrPct >= 0.0005 && s5.atrPct <= 0.04;
+  const ne = last <= Math.max(s5.vwap, s5.ema9) * 1.02;
+  const nes = last >= Math.min(s5.vwap, s5.ema9) * 0.98;
+  const rawChop = s1.choppy && s5.choppy;
+
+  const positiveFlow = s1.ret1 > 0 || s1.ret3 > 0 || s5.ret1 > 0 || s5.ret3 > 0 || s15.ret1 > 0;
+  const trendSupport = la || s5.trend || s15.trend || s5.trendSlope || s15.trendSlope || s5.aboveVwap;
+  const longPotential = !halted && !nearLuld && sv && ne && positiveFlow && trendSupport && s5.rsi14 < 88;
+  const effectiveChop = rawChop && !longPotential;
+
+  const volumeBoost = Math.min(15, Math.max(0, (s5.relVolume - 0.5) * 6));
+  const longVelocity = s1.ret3 > 0 && s5.ret3 > 0 && s15.ret3 > 0 ? 12 : (s1.ret3 > 0 && s5.ret3 > 0 ? 7 : positiveFlow ? 3 : 0);
+  const shortVelocity = s1.ret3 < 0 && s5.ret3 < 0 && s15.ret3 < 0 ? 12 : (s1.ret3 < 0 && s5.ret3 < 0 ? 7 : 0);
+  const longAcceleration = s1.ret1 > 0 && s1.ret3 > 0 ? 6 : 0;
+  const shortAcceleration = s1.ret1 < 0 && s1.ret3 < 0 ? 6 : 0;
+  const longChasePenalty = s1.ret3 > 0.03 || s5.ret3 > 0.05 ? 18 : s1.ret1 > 0.02 ? 8 : 0;
+  const shortChasePenalty = s1.ret3 < -0.03 || s5.ret3 < -0.05 ? 18 : s1.ret1 < -0.02 ? 8 : 0;
+
   let score = 0, ss = 0;
-  if (la) score += 30; if (s5.pullback) score += 18; if (s5.breakout && s5.momentum) score += 20; if (s15.trendSlope) score += 10; if (hr) score += 8; if (vc) score += 10; if (sv) score += 7; if (!ch) score += 8; if (spread <= 0.0012) score += 8;
+  if (la) score += 30; else if (trendSupport) score += 16;
+  if (s5.pullback) score += 18;
+  if (s5.breakout && s5.momentum) score += 20;
+  if (s15.trendSlope) score += 10;
+  if (s5.rsi14 >= 45 && s5.rsi14 <= 80) score += 8;
+  if (s5.relVolume >= 0.5) score += 8;
+  if (sv) score += 7;
+  if (!effectiveChop) score += 8;
+  if (spread <= 0.0025) score += 8;
+  if (longPotential) score += 12;
   score += volumeBoost + longVelocity + longAcceleration - longChasePenalty;
-  if (s5.ret1 > 0.008) score -= 12; if (spread > 0.0025) score -= 24; if (qa > 15) score -= 30; if (ch) score -= 18; if (halted || nearLuld) score -= 100;
-  if (sa) ss += 30; if (s5.shortPullback) ss += 18; if (s5.breakdown && s5.downsideMomentum) ss += 20; if (s15.downSlope) ss += 10; if (hs) ss += 8; if (vc) ss += 10; if (sv) ss += 7; if (!ch) ss += 8; if (spread <= 0.0012) ss += 8;
+  if (spread > 0.01) score -= 40;
+  if (qa > 60) score -= 40;
+  if (effectiveChop) score -= 15;
+  if (halted || nearLuld) score -= 100;
+
+  if (sa) ss += 30;
+  if (s5.shortPullback) ss += 18;
+  if (s5.breakdown && s5.downsideMomentum) ss += 20;
+  if (s15.downSlope) ss += 10;
+  if (s5.rsi14 >= 20 && s5.rsi14 <= 55) ss += 8;
+  if (s5.relVolume >= 0.5) ss += 8;
+  if (sv) ss += 7;
+  if (!effectiveChop) ss += 8;
+  if (spread <= 0.0025) ss += 8;
   ss += volumeBoost + shortVelocity + shortAcceleration - shortChasePenalty;
-  if (s5.ret1 < -0.008) ss -= 12; if (spread > 0.0025) ss -= 24; if (qa > 15) ss -= 30; if (ch) ss -= 18; if (halted || nearLuld) ss -= 100;
+  if (spread > 0.01) ss -= 40;
+  if (qa > 60) ss -= 40;
+  if (effectiveChop) ss -= 15;
+  if (halted || nearLuld) ss -= 100;
+
   return {
     symbol, valid: true, price: last, bid, ask, bidSize, askSize, dollarVolume, mid, spreadPct: spread, quoteAgeSec: qa, tradeAgeSec: ta,
     halted, nearLuld, limitUp, limitDown, atrPct: s5.atrPct, rvol: s5.relVolume, rsi: s5.rsi14,
-    longAligned: la, shortAligned: sa, longContinuation: continuation,
-    longConfirmed: (!halted && !nearLuld && la && hr && vc && sv && !ch && ne && (s5.pullback || (s5.breakout && s5.momentum))) || continuation,
-    shortConfirmed: !halted && !nearLuld && sa && hs && vc && sv && !ch && nes && (s5.shortPullback || (s5.breakdown && s5.downsideMomentum)),
-    score, shortScore: ss, chop: ch, s1, s5, s15
+    longAligned: la, shortAligned: sa, longContinuation: longPotential,
+    longConfirmed: longPotential,
+    shortConfirmed: !halted && !nearLuld && sa && sv && nes && (s5.shortPullback || s5.breakdown || s5.downsideMomentum),
+    score, shortScore: ss, chop: effectiveChop, s1, s5, s15
   };
 }
 
@@ -72,13 +103,7 @@ export function marketRegime(map) {
   if (!r.length) return { mode: "unknown", longOk: true, shortOk: false, breadth: 0, shock: false };
   const l = r.filter(s => s.longAligned).length, sh = r.filter(s => s.shortAligned).length;
   const b = vals.filter(s => s.valid).reduce((a, s) => a + (s.longAligned ? 1 : s.shortAligned ? -1 : 0), 0) / Math.max(1, vals.length);
-  const shock = r.some(s => Math.abs(s.s1.ret1) > 0.008 || s.spreadPct > 0.004 || s.halted || s.nearLuld);
+  const shock = r.some(s => Math.abs(s.s1.ret1) > 0.012 || s.spreadPct > 0.015 || s.halted || s.nearLuld);
   const mode = shock ? "shock" : l >= 2 && b > 0.1 ? "bull" : sh >= 2 && b < -0.1 ? "bear" : "sideways";
-  return {
-    mode,
-    longOk: !shock,
-    shortOk: mode === "bear" && !shock,
-    breadth: round(b, 3),
-    shock
-  };
+  return { mode, longOk: !shock, shortOk: mode === "bear" && !shock, breadth: round(b, 3), shock };
 }
