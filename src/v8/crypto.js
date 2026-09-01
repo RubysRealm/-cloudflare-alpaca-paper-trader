@@ -19,12 +19,11 @@ export async function cryptoUniverse(env) {
   if (universeCache.assets.length && Date.now() - universeCache.at < refreshMs) return universeCache;
   try {
     const assets = await alpaca(env, "/v2/assets?status=active&asset_class=crypto");
-    const usable = (Array.isArray(assets) ? assets : []).filter(a => {
-      const s = String(a.symbol || "").toUpperCase();
-      return a.status !== "inactive" && a.tradable !== false && a.fractionable !== false && (s.endsWith("/USD") || (!s.includes("/") && s.endsWith("USD")));
-    });
+    const usable = (Array.isArray(assets) ? assets : []).filter(a =>
+      a && a.symbol && a.status !== "inactive" && a.tradable !== false
+    );
     if (usable.length) {
-      universeCache = { at: Date.now(), assets: usable, source: "alpaca_assets" };
+      universeCache = { at: Date.now(), assets: usable, source: "alpaca_assets_all_tradable_pairs" };
       return universeCache;
     }
   } catch (error) {
@@ -223,7 +222,7 @@ export async function runCryptoCycle(env, scheduledTime) {
   if (!cryptoEnabled(env)) return { status: "disabled", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7" };
   if (!env.APCA_API_KEY_ID || !env.APCA_API_SECRET_KEY) throw new Error("missing_alpaca_secrets");
 
-  const u = await cryptoUniverse(env), assets = u.assets.slice(0, int(env.CRYPTO_MAX_UNIVERSE_SYMBOLS, 100)), symbols = assets.map(a => a.symbol);
+  const u = await cryptoUniverse(env), assets = u.assets, symbols = assets.map(a => a.symbol);
   if (!symbols.length) return { status: "no_crypto_assets", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7" };
 
   const [snapshots, b1, b5, b15, b60, b240, orderbooks] = await Promise.all([
@@ -277,11 +276,11 @@ export async function runCryptoCycle(env, scheduledTime) {
   const dailyLossGuard = dailyPnl <= -(equity * pct(env.CRYPTO_MAX_DAILY_LOSS_PCT, 0.0125)), lossCountGuard = dailyLosses >= int(env.CRYPTO_MAX_DAILY_LOSING_EXITS, 4), consecutiveLossGuard = maxConsec >= int(env.CRYPTO_MAX_CONSECUTIVE_LOSSES, 3);
   const cooldowns = recentCryptoCooldowns(recentOrders, scheduledTime, int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10));
 
-  const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20), minDollarVolume = num(env.CRYPTO_MIN_DOLLAR_VOLUME_USD, 1000000), minQuoteUsd = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000);
+  const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20), minDollarVolume = 0, minQuoteUsd = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000);
   const occupied = new Set(botPositions.map(p => p._key));
   const ranked = signals.filter(s => {
     const key = norm(s.symbol), bidNotional = s.bid * s.bidSize, askNotional = s.ask * s.askSize;
-    return !occupied.has(key) && !cryptoOpen.has(key) && !cooldowns.has(key) && s.longConfirmed && !s.chop && s.price > 0 && s.dollarVolume >= minDollarVolume && bidNotional >= minQuoteUsd && askNotional >= minQuoteUsd && s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge;
+    return String(s.symbol).toUpperCase().endsWith("/USD") && !occupied.has(key) && !cryptoOpen.has(key) && !cooldowns.has(key) && s.longConfirmed && !s.chop && s.price > 0 && s.dollarVolume >= minDollarVolume && bidNotional >= minQuoteUsd && askNotional >= minQuoteUsd && s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge;
   }).sort((a,b) => b.score - a.score);
 
   const maxPositions = int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotal = num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), maxNew = int(env.CRYPTO_MAX_NEW_ENTRIES_PER_CYCLE, 1);
@@ -302,7 +301,7 @@ export async function runCryptoCycle(env, scheduledTime) {
     } catch (error) { console.log(JSON.stringify({ event: "crypto_entry_failed", symbol: candidate.symbol, message: error.message })); }
   }
 
-  const result = { status: actions.length ? "acted" : "hold", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: symbols.length, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true }, regime, learning, daily: { pnl: round(dailyPnl, 2), losses: dailyLosses, maxConsecLoss: maxConsec }, risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal, dailyLossGuard, lossCountGuard, consecutiveLossGuard }, actions, leaders: ranked.slice(0,8).map(s => ({ symbol: s.symbol, score: round(s.score,1), spreadPct: round(s.spreadPct,5), rvol: round(s.rvol,2), dollarVolume: round(s.dollarVolume,0), bookImbalance: round(s.bookImbalance || 0,3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), researchBoost: round(s.researchBoost || 0,1) })) };
+  const result = { status: actions.length ? "acted" : "hold", strategy: CRYPTO_STRATEGY, endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: symbols.length, allActiveTradablePairs: true, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true }, regime, learning, daily: { pnl: round(dailyPnl, 2), losses: dailyLosses, maxConsecLoss: maxConsec }, risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal, dailyLossGuard, lossCountGuard, consecutiveLossGuard }, actions, leaders: ranked.slice(0,8).map(s => ({ symbol: s.symbol, score: round(s.score,1), spreadPct: round(s.spreadPct,5), rvol: round(s.rvol,2), dollarVolume: round(s.dollarVolume,0), bookImbalance: round(s.bookImbalance || 0,3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), researchBoost: round(s.researchBoost || 0,1) })) };
   console.log(JSON.stringify({ event: "crypto_cycle_complete", ...result }));
   return result;
 }
@@ -314,5 +313,7 @@ export async function cryptoStatus(env) {
   try { if (symbols.length) { await cryptoOrderbooks(env, symbols); orderBookReachable = true; } } catch {}
   let account = {};
   try { account = await alpaca(env, "/v2/account"); } catch {}
-  return { strategy: CRYPTO_STRATEGY, enabled: cryptoEnabled(env), endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: u.assets.length, sampleSymbols: symbols, marketDataReachable, orderBookReachable, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true }, cryptoAccountStatus: account.crypto_status || null, maxConcurrentPositions: int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 82), targetRMultiple: num(env.CRYPTO_TARGET_R_MULTIPLE, 2.4), symbolCooldownMinutes: int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10) };
+  const quoteMarkets = [...new Set(u.assets.map(a => String(a.symbol || "").split("/")[1]).filter(Boolean))].sort();
+  const uniqueCryptoAssets = new Set(u.assets.map(a => String(a.symbol || "").split("/")[0]).filter(Boolean)).size;
+  return { strategy: CRYPTO_STRATEGY, enabled: cryptoEnabled(env), endpoint: "paper", market: "24x7", universeSource: u.source, universeCount: u.assets.length, uniqueCryptoAssets, quoteMarkets, allActiveTradablePairs: true, sampleSymbols: symbols, marketDataReachable, orderBookReachable, research: { cycleMinutes: 1, universeRefreshMinutes: int(env.CRYPTO_UNIVERSE_REFRESH_MINUTES, 1), timeframes: ["1Min","5Min","15Min","1Hour","4Hour"], orderBookDepth: true, quickNetPositiveEdgeExit: true, scansAllQuoteMarkets: true }, cryptoAccountStatus: account.crypto_status || null, maxConcurrentPositions: int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4), maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 100000), minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 82), targetRMultiple: num(env.CRYPTO_TARGET_R_MULTIPLE, 2.4), symbolCooldownMinutes: int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10) };
 }
