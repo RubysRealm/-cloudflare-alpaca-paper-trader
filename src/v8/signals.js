@@ -72,7 +72,7 @@ export function marketRegime(map) {
   const mode = shock ? "shock" : l >= 2 && b > 0.1 ? "bull" : sh >= 2 && b < -0.1 ? "bear" : "sideways";
   return {
     mode,
-    longOk: (mode === "bull" || mode === "bear") && !shock,
+    longOk: !shock,
     shortOk: mode === "bear" && !shock,
     breadth: round(b, 3),
     shock
