@@ -1,4 +1,5 @@
-import { bool } from "./config.js";
+import { bool, isBotOrder } from "./config.js";
+import { alpaca } from "./api.js";
 
 function stub(env) {
   if (!env.TRADING_STATE) return null;
@@ -61,7 +62,50 @@ export async function persistJournal(env, journal) {
   return call(env, "/journal", { method: "POST", body: JSON.stringify(journal) });
 }
 
+async function directAlpacaHealth(env) {
+  const [account, positions, orders] = await Promise.all([
+    alpaca(env, "/v2/account"),
+    alpaca(env, "/v2/positions"),
+    alpaca(env, "/v2/orders?status=all&limit=200&direction=desc&nested=false")
+  ]);
+  const botOrders = (orders || []).filter(isBotOrder);
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const etDate = value => {
+    if (!value) return "";
+    try { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }
+    catch { return ""; }
+  };
+  const botOrdersToday = botOrders.filter(o => etDate(o.submitted_at || o.created_at) === today);
+  return {
+    mode: "direct_alpaca_rest",
+    connected: false,
+    persistentState: false,
+    realtimeStreamDisabled: true,
+    equity: Number(account?.equity || 0),
+    lastEquity: Number(account?.last_equity || 0),
+    buyingPower: Number(account?.buying_power || 0),
+    positions: Array.isArray(positions) ? positions.length : 0,
+    botOrdersToday: botOrdersToday.length,
+    lastBotOrderAt: botOrders[0]?.submitted_at || botOrders[0]?.created_at || null,
+    recentBotOrders: botOrders.slice(0, 8).map(o => ({
+      symbol: o.symbol,
+      side: o.side,
+      type: o.type,
+      status: o.status,
+      submittedAt: o.submitted_at || o.created_at || null,
+      filledAt: o.filled_at || null,
+      filledAvgPrice: o.filled_avg_price ? Number(o.filled_avg_price) : null,
+      filledQty: o.filled_qty ? Number(o.filled_qty) : null,
+      limitPrice: o.limit_price ? Number(o.limit_price) : null
+    }))
+  };
+}
+
 export async function stateHealth(env) {
+  if (!bool(env.REALTIME_STREAM_ENABLED, true) && !bool(env.PERSISTENT_STATE_ENABLED, true)) {
+    try { return await directAlpacaHealth(env); }
+    catch (error) { return { mode: "direct_alpaca_rest", connected: false, persistentState: false, realtimeStreamDisabled: true, stateError: String(error?.message || error).slice(0, 500) }; }
+  }
   if (!env.TRADING_STATE) return { connected: false, persistentState: false, stateError: "missing_TRADING_STATE_binding" };
   const s = stub(env);
   if (!s) return { connected: false, persistentState: false, stateError: "unable_to_create_TRADING_STATE_stub" };
