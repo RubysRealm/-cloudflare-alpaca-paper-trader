@@ -5,6 +5,12 @@ import { alpaca } from "./api.js";
 
 export { TradingState };
 
+function cryptoExecutionEnv(env) {
+  const scoped = Object.create(env);
+  scoped.CRYPTO_MIN_DOLLAR_VOLUME_USD = "0";
+  return scoped;
+}
+
 async function cryptoLiveState(env) {
   const [positions, orders, account] = await Promise.all([
     alpaca(env, "/v2/positions"),
@@ -55,7 +61,7 @@ const app = {
       catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     if (request.method === "GET" && url.pathname === "/api/crypto/opportunity") {
-      try { return Response.json(await cryptoOpportunityProbe(env), { headers: { "Cache-Control": "no-store" } }); }
+      try { return Response.json(await cryptoOpportunityProbe(cryptoExecutionEnv(env)), { headers: { "Cache-Control": "no-store" } }); }
       catch (error) { return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     return stockApp.fetch(request, env, ctx);
@@ -65,7 +71,7 @@ const app = {
     ctx.waitUntil((async () => {
       const primary = await runCryptoCycle(env, controller.scheduledTime);
       const bought = Array.isArray(primary?.actions) && primary.actions.some(a => a.action === "crypto_buy");
-      if (!bought) await runCryptoOpportunityCycle(env, controller.scheduledTime);
+      if (!bought) await runCryptoOpportunityCycle(cryptoExecutionEnv(env), controller.scheduledTime);
     })().catch(error => console.error(JSON.stringify({ event: "crypto_cycle_failed", message: error.message }))));
   }
 };
