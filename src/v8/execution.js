@@ -44,7 +44,7 @@ export function exitDecision(position, signal, env, now, etParts) {
   }
 
   const { hour, minute } = etParts(now);
-  if (hour > 15 || (hour === 15 && minute >= 55)) return { exit: true, reason: "end_of_day_flatten", pnlPct: pnl };
+  if (hour > 15 || (hour === 15 && minute >= 50)) return { exit: true, reason: "end_of_day_flatten", pnlPct: pnl };
   return { exit: false, reason: "hold", pnlPct: pnl };
 }
 
@@ -85,9 +85,13 @@ export async function placeLimitBuy(env, c, notional, now) {
 }
 
 export async function placeLimitSell(env, p, s, now, reason) {
-  let q = null; try { q = await freshQuote(env, p.symbol); } catch {}
-  const slip = pct(env.MAX_EXIT_SLIPPAGE_PCT, 0.0012), ref = q?.bid > 0 ? q.bid : s?.bid > 0 ? s.bid : +p.current_price, limit = ref * (1 - slip), qty = Math.abs(+p.qty || 0);
+  const qty = Math.abs(+p.qty || 0);
   if (!(qty > 0)) throw new Error("exit_quantity_too_small");
+  if (reason === "end_of_day_flatten") {
+    return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: p.symbol, qty: qty.toFixed(8), side: "sell", type: "market", time_in_force: "day", client_order_id: cid("paper8-sell", p.symbol, now, "eodflat") }) });
+  }
+  let q = null; try { q = await freshQuote(env, p.symbol); } catch {}
+  const slip = pct(env.MAX_EXIT_SLIPPAGE_PCT, 0.0012), ref = q?.bid > 0 ? q.bid : s?.bid > 0 ? s.bid : +p.current_price, limit = ref * (1 - slip);
   return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: p.symbol, qty: qty.toFixed(8), side: "sell", type: "limit", limit_price: Math.max(0.01, limit).toFixed(2), time_in_force: "day", client_order_id: cid("paper8-sell", p.symbol, now, reason.slice(0, 8)) }) });
 }
 
