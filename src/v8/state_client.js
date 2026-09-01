@@ -174,6 +174,18 @@ async function directAlpacaHealth(env) {
     connected: false,
     persistentState: false,
     realtimeStreamDisabled: true,
+    runtimeConfig: {
+      orderNotionalUsd: num(env.ORDER_NOTIONAL_USD, 5),
+      maxPositionUsd: num(env.MAX_POSITION_USD, 5),
+      maxTotalExposureUsd: num(env.MAX_TOTAL_EXPOSURE_USD, 10),
+      maxConcurrentPositions: int(env.MAX_CONCURRENT_POSITIONS, 2),
+      maxUniverseSymbols: int(env.MAX_UNIVERSE_SYMBOLS, 30),
+      minEntryScore: num(env.MIN_ENTRY_SCORE, 82),
+      riskPerTradePct: pct(env.RISK_PER_TRADE_PCT, 0.00025),
+      targetRMultiple: num(env.TARGET_R_MULTIPLE, 1.8),
+      symbolCooldownMinutes: int(env.SYMBOL_COOLDOWN_MINUTES, 45),
+      orderTimeoutSeconds: int(env.ORDER_TIMEOUT_SECONDS, 75)
+    },
     equity: Number(account?.equity || 0),
     lastEquity: Number(account?.last_equity || 0),
     buyingPower: Number(account?.buying_power || 0),
