@@ -1,6 +1,6 @@
-export const STRATEGY='intraday-adaptive-v8.2';
+export const STRATEGY='intraday-adaptive-v8.3';
 export const BOT_PREFIXES=['paper-','paper8-'];
-export const TECH=new Set(['QQQ','XLK','SMH','SOXX','NVDA','AAPL','TSLA','AMD','AMZN','META','MSFT','GOOGL','GOOG','AVGO','NFLX','CRM','ORCL','INTC','MU','QCOM','ARM','PLTR']);
+export const TECH=new Set(['QQQ','TQQQ','SQQQ','XLK','SMH','SOXX','SOXL','SOXS','NVDA','AAPL','TSLA','AMD','AMZN','META','MSFT','GOOGL','GOOG','AVGO','NFLX','CRM','ORCL','INTC','MU','QCOM','ARM','PLTR']);
 export const num=(v,f)=>{const n=Number(v);return Number.isFinite(n)&&n>0?n:f};
 export const pct=(v,f)=>{const n=Number(v);return Number.isFinite(n)&&n>0&&n<1?n:f};
 export const int=(v,f)=>{const n=Number(v);return Number.isInteger(n)&&n>0?n:f};
