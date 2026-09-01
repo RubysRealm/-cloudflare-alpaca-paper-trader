@@ -81,38 +81,74 @@ async function opportunityDiagnostics(env, positions) {
   const signals = bundles.filter(s => s.valid);
   const map = new Map(signals.map(s => [s.symbol, s]));
   const regime = marketRegime(map);
-  const occupied = new Set((positions || []).map(p => p.symbol));
+  const occupied = new Set((positions || []).filter(p => Math.abs(Number(p.market_value || 0)) >= 1).map(p => p.symbol));
   const maxSpread = pct(env.MAX_SPREAD_PCT, 0.0015);
   const maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20);
   const minDollarVolume = num(env.MIN_DOLLAR_VOLUME_USD, 50_000_000);
   const minQuoteSize = num(env.MIN_QUOTE_SIZE, 1);
   const minPrice = num(env.MIN_PRICE_USD, 5);
-  const ranked = signals.filter(s =>
-    !occupied.has(s.symbol) && !s.halted && !s.nearLuld &&
-    s.price >= minPrice && s.dollarVolume >= minDollarVolume &&
-    s.bidSize >= minQuoteSize && s.askSize >= minQuoteSize &&
-    s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge && !s.chop
-  ).sort((a, b) => b.score - a.score);
-  return {
-    universeCount: symbols.length,
-    validSignals: signals.length,
-    rankedCount: ranked.length,
-    entryWindowOpen: entryWindowOpen(Date.now()),
-    minEntryScore: num(env.MIN_ENTRY_SCORE, 82),
-    regime,
-    topCandidates: ranked.slice(0, 10).map(s => ({
-      symbol: s.symbol,
-      score: Number(s.score.toFixed(1)),
+  const threshold = num(env.MIN_ENTRY_SCORE, 82);
+
+  const rejectionCounts = { occupied:0, halted:0, nearLuld:0, price:0, dollarVolume:0, bidSize:0, askSize:0, spread:0, quoteAge:0, chop:0, notLongConfirmed:0, belowScore:0 };
+  const diagnostics = signals.map(s => {
+    const checks = {
+      occupied: occupied.has(s.symbol),
+      halted: Boolean(s.halted),
+      nearLuld: Boolean(s.nearLuld),
+      priceOk: s.price >= minPrice,
+      dollarVolumeOk: s.dollarVolume >= minDollarVolume,
+      bidSizeOk: s.bidSize >= minQuoteSize,
+      askSizeOk: s.askSize >= minQuoteSize,
+      spreadOk: s.spreadPct <= maxSpread,
+      quoteAgeOk: s.quoteAgeSec <= maxAge,
+      chopOk: !s.chop,
       longConfirmed: Boolean(s.longConfirmed),
+      scoreOk: s.score >= threshold
+    };
+    if (checks.occupied) rejectionCounts.occupied++;
+    if (checks.halted) rejectionCounts.halted++;
+    if (checks.nearLuld) rejectionCounts.nearLuld++;
+    if (!checks.priceOk) rejectionCounts.price++;
+    if (!checks.dollarVolumeOk) rejectionCounts.dollarVolume++;
+    if (!checks.bidSizeOk) rejectionCounts.bidSize++;
+    if (!checks.askSizeOk) rejectionCounts.askSize++;
+    if (!checks.spreadOk) rejectionCounts.spread++;
+    if (!checks.quoteAgeOk) rejectionCounts.quoteAge++;
+    if (!checks.chopOk) rejectionCounts.chop++;
+    if (!checks.longConfirmed) rejectionCounts.notLongConfirmed++;
+    if (!checks.scoreOk) rejectionCounts.belowScore++;
+    const basicOk = !checks.occupied && !checks.halted && !checks.nearLuld && checks.priceOk && checks.dollarVolumeOk && checks.bidSizeOk && checks.askSizeOk && checks.spreadOk && checks.quoteAgeOk && checks.chopOk;
+    return {
+      symbol: s.symbol,
+      score: Number((s.score || 0).toFixed(1)),
+      basicOk,
+      longConfirmed: checks.longConfirmed,
       longAligned: Boolean(s.longAligned),
       price: Number((s.price || 0).toFixed(4)),
+      bidSize: Number(s.bidSize || 0),
+      askSize: Number(s.askSize || 0),
       spreadPct: Number((s.spreadPct || 0).toFixed(5)),
       quoteAgeSec: Number((s.quoteAgeSec || 0).toFixed(1)),
       dollarVolume: Math.round(s.dollarVolume || 0),
       rvol: Number((s.rvol || 0).toFixed(2)),
       rsi: Number((s.rsi || 0).toFixed(1)),
-      chop: Boolean(s.chop)
-    }))
+      chop: Boolean(s.chop),
+      checks
+    };
+  });
+
+  const ranked = diagnostics.filter(x => x.basicOk).sort((a, b) => b.score - a.score);
+  return {
+    universeCount: symbols.length,
+    validSignals: signals.length,
+    rankedCount: ranked.length,
+    entryWindowOpen: entryWindowOpen(Date.now()),
+    minEntryScore: threshold,
+    thresholds: { maxSpread, maxAge, minDollarVolume, minQuoteSize, minPrice },
+    regime,
+    rejectionCounts,
+    validSignalDiagnostics: diagnostics.sort((a,b) => b.score-a.score).slice(0, 12),
+    topCandidates: ranked.slice(0, 10)
   };
 }
 
