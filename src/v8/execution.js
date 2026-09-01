@@ -1,5 +1,5 @@
 import { alpaca, fetchLatestQuote } from "./api.js";
-import { pct, int, num, clamp, isBotOrder } from "./config.js";
+import { pct, int, num, clamp, isBotOrder, etParts as marketEtParts } from "./config.js";
 
 export function dynamicExitParams(signal, env, side = "long") {
   const a = signal?.atrPct || 0.004, base = pct(env.STOP_LOSS_PCT, 0.0045), min = pct(env.MIN_STOP_LOSS_PCT, 0.003), max = pct(env.MAX_STOP_LOSS_PCT, 0.008);
@@ -11,6 +11,9 @@ export function exitDecision(position, signal, env, now, etParts) {
   const entry = +position.avg_entry_price, price = signal?.price || +position.current_price, side = +position.qty < 0 ? "short" : "long", p = dynamicExitParams(signal, env, side);
   const pnl = entry > 0 ? (side === "long" ? price / entry - 1 : entry / price - 1) : 0;
   const scoreFloor = num(env.MIN_ENTRY_SCORE, 82);
+  const { hour, minute } = etParts(now);
+
+  if (hour === 9 && minute === 30) return { exit: true, reason: "session_open_reset", pnlPct: pnl };
 
   if (pnl <= -p.stop) return { exit: true, reason: "dynamic_stop", pnlPct: pnl };
 
@@ -43,7 +46,6 @@ export function exitDecision(position, signal, env, now, etParts) {
     if (fail) return { exit: true, reason: "trend_failure", pnlPct: pnl };
   }
 
-  const { hour, minute } = etParts(now);
   if (hour > 15 || (hour === 15 && minute >= 50)) return { exit: true, reason: "end_of_day_flatten", pnlPct: pnl };
   return { exit: false, reason: "hold", pnlPct: pnl };
 }
@@ -87,8 +89,11 @@ export async function placeLimitBuy(env, c, notional, now) {
 export async function placeLimitSell(env, p, s, now, reason) {
   const qty = Math.abs(+p.qty || 0);
   if (!(qty > 0)) throw new Error("exit_quantity_too_small");
-  if (reason === "end_of_day_flatten") {
-    return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: p.symbol, qty: qty.toFixed(8), side: "sell", type: "market", time_in_force: "day", client_order_id: cid("paper8-sell", p.symbol, now, "eodflat") }) });
+  const { hour, minute } = marketEtParts(now);
+  const forcedMarketExit = reason === "end_of_day_flatten" || reason === "session_open_reset" || (hour === 9 && minute === 30);
+  if (forcedMarketExit) {
+    const tag = hour === 9 && minute === 30 ? "openreset" : "eodflat";
+    return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: p.symbol, qty: qty.toFixed(8), side: "sell", type: "market", time_in_force: "day", client_order_id: cid("paper8-sell", p.symbol, now, tag) }) });
   }
   let q = null; try { q = await freshQuote(env, p.symbol); } catch {}
   const slip = pct(env.MAX_EXIT_SLIPPAGE_PCT, 0.0012), ref = q?.bid > 0 ? q.bid : s?.bid > 0 ? s.bid : +p.current_price, limit = ref * (1 - slip);
