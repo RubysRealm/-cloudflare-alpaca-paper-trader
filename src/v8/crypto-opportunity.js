@@ -9,10 +9,9 @@ const enabled = env => String(env.CRYPTO_TRADING_ENABLED ?? "true").toLowerCase(
 
 async function universe(env) {
   const assets = await alpaca(env, "/v2/assets?status=active&asset_class=crypto");
-  return (Array.isArray(assets) ? assets : []).filter(a => {
-    const s = String(a.symbol || "").toUpperCase();
-    return a.status !== "inactive" && a.tradable !== false && a.fractionable !== false && (s.endsWith("/USD") || (!s.includes("/") && s.endsWith("USD")));
-  }).slice(0, int(env.CRYPTO_MAX_UNIVERSE_SYMBOLS, 100));
+  return (Array.isArray(assets) ? assets : []).filter(a =>
+    a && a.symbol && a.status !== "inactive" && a.tradable !== false
+  );
 }
 
 function hours(tf) {
@@ -139,12 +138,13 @@ export async function cryptoOpportunityProbe(env) {
   if (!enabled(env)) return { enabled: false, endpoint: "paper" };
   const r = await research(env), minScore = threshold(r.mode, env);
   const minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000), maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20);
-  const ranked = r.candidates.filter(x => Object.values(gates(x,minScore,minDepth,maxSpread,maxAge)).every(Boolean)).sort((a,b) => b.cryptoScore - a.cryptoScore);
+  const ranked = r.candidates.filter(x => String(x.symbol).toUpperCase().endsWith("/USD") && Object.values(gates(x,minScore,minDepth,maxSpread,maxAge)).every(Boolean)).sort((a,b) => b.cryptoScore - a.cryptoScore);
   const diagnostics = [...r.candidates].sort((a,b) => b.cryptoScore - a.cryptoScore).slice(0,12).map(x => ({
-    symbol:x.symbol, score:round(x.cryptoScore,1), baseScore:round(x.score,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), quoteAgeSec:round(x.quoteAgeSec,1), dollarVolume:round(x.dollarVolume,0), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), trendVotes:x.trendVotes, flow:Boolean(x.cryptoFlow), setup:Boolean(x.cryptoSetup), h1Trend:Boolean(x.h1?.trend), h1Down:Boolean(x.h1?.downTrend), gates:gates(x,minScore,minDepth,maxSpread,maxAge)
+    symbol:x.symbol, score:round(x.cryptoScore,1), baseScore:round(x.score,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), quoteAgeSec:round(x.quoteAgeSec,1), dollarVolume:round(x.dollarVolume,0), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), trendVotes:x.trendVotes, flow:Boolean(x.cryptoFlow), setup:Boolean(x.cryptoSetup), h1Trend:Boolean(x.h1?.trend), h1Down:Boolean(x.h1?.downTrend), directUsdExecution:String(x.symbol).toUpperCase().endsWith("/USD"), gates:gates(x,minScore,minDepth,maxSpread,maxAge)
   }));
+  const quoteMarkets = [...new Set(r.assets.map(a => String(a.symbol || "").split("/")[1]).filter(Boolean))].sort();
   return {
-    enabled: true, endpoint: "paper", market: "24x7", universeCount: r.assets.length, validSignals: r.candidates.length, mode: r.mode, threshold: minScore,
+    enabled: true, endpoint: "paper", market: "24x7", universeCount: r.assets.length, allActiveTradablePairs: true, quoteMarkets, validSignals: r.candidates.length, mode: r.mode, threshold: minScore,
     thresholds:{minVol:0,volumeGate:false,minDepth,maxSpread,maxAge}, executableCount: ranked.length,
     leaders: ranked.slice(0,10).map(x => ({ symbol:x.symbol, score:round(x.cryptoScore,1), price:round(x.price,8), spreadPct:round(x.spreadPct,5), bookImbalance:round(x.imbalance,3), bidDepthUsd:round(x.bidDepth,0), askDepthUsd:round(x.askDepth,0), dollarVolume:round(x.dollarVolume,0), trendVotes:x.trendVotes, h1Trend:Boolean(x.h1?.trend) })),
     diagnostics
@@ -166,10 +166,10 @@ export async function runCryptoOpportunityCycle(env, scheduledTime) {
   const minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD,1000), maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT,0.004), maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS,20);
   const ranked = r.candidates.filter(x => {
     const k = norm(x.symbol);
-    return !held.has(k) && !open.has(k) && !cooldown.has(k) && Object.values(gates(x,minScore,minDepth,maxSpread,maxAge)).every(Boolean);
+    return String(x.symbol).toUpperCase().endsWith("/USD") && !held.has(k) && !open.has(k) && !cooldown.has(k) && Object.values(gates(x,minScore,minDepth,maxSpread,maxAge)).every(Boolean);
   }).sort((a,b) => b.cryptoScore - a.cryptoScore);
   const best = ranked[0];
-  if (!best) return { status:"hold", mode:r.mode, threshold:minScore, validSignals:r.candidates.length, executableCount:0 };
+  if (!best) return { status:"hold", mode:r.mode, threshold:minScore, validSignals:r.candidates.length, executableCount:0, universeCount:r.assets.length, allActiveTradablePairs:true };
 
   const equity = Math.max(1,+account.equity||1), stop = clamp(Math.max(0.008,(best.s5?.atrPct||0.008)*0.9),0.005,0.02), riskBudget = equity * pct(env.CRYPTO_RISK_PER_TRADE_PCT,0.0035), riskBased = riskBudget / stop;
   const maxPosition = num(env.CRYPTO_MAX_POSITION_USD,25000), cap = num(env.CRYPTO_ORDER_NOTIONAL_USD,25000), remaining = Math.max(0,maxExposure-currentExposure), cash = Math.max(0,+(account.non_marginable_buying_power || account.cash || account.buying_power || 0));
@@ -178,7 +178,7 @@ export async function runCryptoOpportunityCycle(env, scheduledTime) {
 
   const id = `${PREFIX}buy-native-${norm(best.symbol)}-${Number(scheduledTime).toString(36)}`.slice(0,48);
   const order = await alpaca(env,"/v2/orders",{method:"POST",body:JSON.stringify({symbol:best.symbol,notional:round(notional,2).toFixed(2),side:"buy",type:"market",time_in_force:"gtc",client_order_id:id})});
-  const result = { status:"ordered", endpoint:"paper", mode:r.mode, symbol:best.symbol, score:round(best.cryptoScore,1), threshold:minScore, notional:round(notional,2), orderId:order?.id || null, orderStatus:order?.status || null, spreadPct:round(best.spreadPct,5), bookImbalance:round(best.imbalance,3) };
+  const result = { status:"ordered", endpoint:"paper", mode:r.mode, symbol:best.symbol, score:round(best.cryptoScore,1), threshold:minScore, notional:round(notional,2), orderId:order?.id || null, orderStatus:order?.status || null, spreadPct:round(best.spreadPct,5), bookImbalance:round(best.imbalance,3), universeCount:r.assets.length, allActiveTradablePairs:true };
   console.log(JSON.stringify({event:"crypto_native_entry",...result}));
   return result;
 }
