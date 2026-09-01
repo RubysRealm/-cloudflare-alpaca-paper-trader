@@ -62,5 +62,20 @@ export async function persistJournal(env, journal) {
 }
 
 export async function stateHealth(env) {
-  return call(env, "/health");
+  const [health, journal] = await Promise.all([call(env, "/health"), call(env, "/journal")]);
+  if (!health) return null;
+  const journals = Array.isArray(journal?.journals) ? journal.journals : [];
+  const recent = journals.slice(-5).map(j => ({
+    ts: j.ts,
+    status: Array.isArray(j.actions) && j.actions.length ? "acted" : "hold",
+    actions: j.actions || [],
+    daily: j.daily || null,
+    risk: j.risk || null,
+    regime: j.regime || null,
+    learning: j.learning || null,
+    leaders: (j.leaders || []).slice(0, 5),
+    universeCount: Array.isArray(j.universe) ? j.universe.length : 0,
+    discordConfigured: Boolean(j.externalSignals?.discordConfigured)
+  }));
+  return { ...health, recentCycles: recent };
 }
