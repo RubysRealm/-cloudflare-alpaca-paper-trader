@@ -1,4 +1,4 @@
-import { alpaca, marketDataRaw } from "./api.js";
+import { alpaca, marketDataRaw, recentNewsContext } from "./api.js";
 import { timeframeSignal, combineSignals } from "./signals.js";
 import { num, pct, int, clamp, round } from "./config.js";
 
@@ -169,17 +169,35 @@ function entryEconomics(signal, env) {
   const exitSlip = pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT, 0.0015);
   const roundTripCost = fee * 2 + Math.max(0, signal?.spreadPct || 0) + entrySlip + exitSlip;
   const expectedGrossMove = clamp(Math.max(
-    (signal?.atrPct || 0.006) * 1.9,
+    (signal?.atrPct || 0) * 1.9,
     Math.max(0, signal?.s5?.ret3 || 0) * 1.6,
     Math.max(0, signal?.s15?.ret1 || 0) * 1.35,
     Math.max(0, signal?.h1?.ret1 || 0) * 0.9,
-    0.01
-  ), 0.01, 0.08);
+    0.0005
+  ), 0.0005, 0.08);
   const expectedNetEdge = expectedGrossMove - roundTripCost;
-  const minNet = pct(env.CRYPTO_MIN_EXPECTED_NET_EDGE_PCT, 0.01);
-  const minRatio = num(env.CRYPTO_MIN_REWARD_TO_COST, 2);
   const rewardToCost = roundTripCost > 0 ? expectedGrossMove / roundTripCost : 99;
-  return { roundTripCost, expectedGrossMove, expectedNetEdge, rewardToCost, ok: expectedNetEdge >= minNet && rewardToCost >= minRatio };
+  return { roundTripCost, expectedGrossMove, expectedNetEdge, rewardToCost, ok: expectedNetEdge > 0 };
+}
+
+function applyOpportunityResearch(signal, news) {
+  const catalystScore = news?.score || 0;
+  const adjustedScore = signal.score + catalystScore;
+  const probability = clamp(
+    0.43 + Math.max(0, adjustedScore - 82) * 0.0045 + (signal.trendVotes || 0) * 0.017 +
+    (signal.h1?.trend ? 0.05 : 0) + (signal.h4?.trend ? 0.05 : 0) +
+    clamp((signal.bookImbalance || 0) * 0.12, -0.08, 0.08) + clamp(catalystScore / 100, -0.18, 0.12),
+    0.22, 0.93
+  );
+  const movementOpportunity = Math.max(
+    signal.atrPct || 0,
+    Math.max(0, signal.s1?.ret3 || 0) * 1.7,
+    Math.max(0, signal.s5?.ret3 || 0) * 1.4,
+    Math.max(0, signal.s15?.ret1 || 0) * 1.15
+  );
+  const movementMultiplier = 1 + clamp(movementOpportunity * 55, 0, 3);
+  const opportunityScore = Math.max(0, signal.entryEconomics?.expectedNetEdge || 0) * probability * movementMultiplier;
+  return { ...signal, score: adjustedScore, probability, movementOpportunity, opportunityScore, catalyst: news || { score: 0, positive: 0, negative: 0, severe: false, headlines: [] } };
 }
 
 function barTimeMs(bar) {
@@ -215,7 +233,7 @@ function peakPriceSinceEntry(entryPrice, currentPrice, entryMeta, bars1, bars5) 
   return peak;
 }
 
-function profitExitDecision(position, signal, env, peakPrice, bestAlternative) {
+function profitExitDecision(position, signal, peakPrice, bestAlternative) {
   const entry = +position.avg_entry_price || 0;
   const bid = +(signal?.bid || signal?.price || position.current_price || 0);
   if (!(entry > 0 && bid > 0)) return { exit: false, reason: "hold_no_quote", pnlPct: 0, peakPnlPct: 0 };
@@ -224,26 +242,22 @@ function profitExitDecision(position, signal, env, peakPrice, bestAlternative) {
   const peakPnlPct = peak / entry - 1;
   if (!(pnlPct > 0)) return { exit: false, reason: peakPnlPct > 0 ? "hold_recovery_after_profit" : "hold_until_profitable", pnlPct, peakPnlPct };
 
-  const minGiveback = pct(env.CRYPTO_PROFIT_TRAIL_MIN_GIVEBACK_PCT, 0.0015);
-  const maxGiveback = pct(env.CRYPTO_PROFIT_TRAIL_MAX_GIVEBACK_PCT, 0.008);
-  const givebackFraction = clamp(num(env.CRYPTO_PROFIT_TRAIL_GIVEBACK_FRACTION, 0.35), 0.05, 0.9);
-  const givebackPct = clamp(Math.max(minGiveback, peakPnlPct * givebackFraction), minGiveback, maxGiveback);
-  const protectedPnlFloor = Math.max(0.000001, peakPnlPct - givebackPct);
-  const retracedFromHigh = peakPnlPct > 0 && pnlPct <= protectedPnlFloor;
+  const retracePct = peak > 0 ? Math.max(0, (peak - bid) / peak) : 0;
   const shortTermRollover = Boolean(signal && signal.s1?.ret1 < 0 && (signal.s1?.ret3 < 0 || signal.s5?.ret1 <= 0));
-  const meaningfulGiveback = peakPnlPct - pnlPct >= Math.max(0.0005, peakPnlPct * 0.2);
-  const currentEdge = signal?.entryEconomics?.expectedNetEdge || 0;
-  const alternativeEdge = bestAlternative?.entryEconomics?.expectedNetEdge || 0;
-  const rotationMargin = pct(env.CRYPTO_ROTATION_EDGE_MARGIN_PCT, 0.004);
-  const rotate = Boolean(bestAlternative && norm(bestAlternative.symbol) !== norm(signal?.symbol) && alternativeEdge >= currentEdge + rotationMargin && alternativeEdge >= currentEdge * 1.25);
-  const exit = pnlPct > 0 && (rotate || retracedFromHigh || (shortTermRollover && meaningfulGiveback));
+  const dynamicNoise = Math.max((signal?.atrPct || 0.002) * 0.3, Math.abs(signal?.s1?.ret1 || 0) * 0.4, 0.0003);
+  const heavyReversal = shortTermRollover && retracePct > dynamicNoise;
+  const currentOpportunity = signal?.opportunityScore || 0;
+  const alternativeOpportunity = bestAlternative?.opportunityScore || 0;
+  const rotate = Boolean(bestAlternative && norm(bestAlternative.symbol) !== norm(signal?.symbol) && alternativeOpportunity > currentOpportunity);
+  const edgeLost = Boolean(signal?.catalyst?.severe || currentOpportunity <= 0 || !signal?.longConfirmed);
+  const exit = pnlPct > 0 && (rotate || edgeLost || heavyReversal);
   return {
     exit,
-    reason: rotate ? "profit_rotate_stronger_edge" : retracedFromHigh ? "profit_trailing_reversal" : exit ? "profit_momentum_reversal" : "ride_best_edge",
+    reason: rotate ? "profit_rotate_stronger_opportunity" : edgeLost ? "profit_edge_lost" : heavyReversal ? "profit_reversal" : "ride_best_opportunity",
     pnlPct,
     peakPnlPct,
-    givebackPct,
-    protectedPnlFloor
+    retracePct,
+    dynamicNoise
   };
 }
 
@@ -313,7 +327,7 @@ async function placeProfitProtectCryptoSell(env, position, asset, signal, now, d
   const limitPrice = formatLimitPrice(Math.max(profitFloor, marketableFloor), asset);
   return alpaca(env, "/v2/orders", {
     method: "POST",
-    body: JSON.stringify({ symbol, qty, side: "sell", type: "limit", limit_price: limitPrice, time_in_force: "ioc", client_order_id: cid("sell", symbol, now, decision.reason.includes("rotate") ? "rotate" : decision.reason.includes("trail") ? "trail" : "roll") })
+    body: JSON.stringify({ symbol, qty, side: "sell", type: "limit", limit_price: limitPrice, time_in_force: "ioc", client_order_id: cid("sell", symbol, now, decision.reason.includes("rotate") ? "rotate" : "profit") })
   });
 }
 
@@ -345,22 +359,26 @@ export async function runCryptoCycle(env, scheduledTime) {
     }
   }).filter(s => s.valid);
 
-  const signals = applyCrossMarketConfirmation(rawSignals);
-  const signalByNorm = new Map(signals.map(s => [norm(s.symbol), s]));
-  const assetByNorm = new Map(assets.map(a => [norm(a.symbol), a]));
-  const regime = cryptoRegime(signals);
+  const crossSignals = applyCrossMarketConfirmation(rawSignals);
+  const regime = cryptoRegime(crossSignals);
   const threshold = requiredScore(regime, env);
   const minDepth = num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD, 1000);
   const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004);
   const maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20);
+  const news = await recentNewsContext(env, crossSignals.map(s => norm(s.symbol)), scheduledTime, 120);
+  const signals = crossSignals.map(s => {
+    const withEconomics = { ...s, entryEconomics: entryEconomics(s, env) };
+    return applyOpportunityResearch(withEconomics, news.get(norm(s.symbol)));
+  });
+  const signalByNorm = new Map(signals.map(s => [norm(s.symbol), s]));
+  const assetByNorm = new Map(assets.map(a => [norm(a.symbol), a]));
 
-  for (const s of signals) s.entryEconomics = entryEconomics(s, env);
   const marketLeaders = signals.filter(s =>
-    String(s.symbol).toUpperCase().endsWith("/USD") && regime.broadLongOk &&
+    String(s.symbol).toUpperCase().endsWith("/USD") && regime.broadLongOk && !s.catalyst?.severe &&
     s.longConfirmed && !s.chop && s.score >= threshold && s.price > 0 &&
     s.bidDepthUsd >= minDepth && s.askDepthUsd >= minDepth &&
     s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge && s.entryEconomics.ok
-  ).sort((a, b) => (b.entryEconomics.expectedNetEdge - a.entryEconomics.expectedNetEdge) || (b.score - a.score));
+  ).sort((a, b) => (b.opportunityScore - a.opportunityScore) || (b.probability - a.probability) || (b.score - a.score));
 
   const [positions, openOrders, recentOrders, account] = await Promise.all([
     alpaca(env, "/v2/positions"),
@@ -383,12 +401,11 @@ export async function runCryptoCycle(env, scheduledTime) {
   for (const position of botPositions) {
     if (currentOpen.has(position._key)) continue;
     const signal = signalByNorm.get(position._key);
-    if (signal && !signal.entryEconomics) signal.entryEconomics = entryEconomics(signal, env);
     const asset = assetByNorm.get(position._key);
     const symbol = signal?.symbol || asset?.symbol;
     const peakPrice = peakPriceSinceEntry(+position.avg_entry_price || 0, +(signal?.bid || signal?.price || position.current_price || 0), entryTimes.get(position._key), b1[symbol] || [], b5[symbol] || []);
     const bestAlternative = marketLeaders.find(x => norm(x.symbol) !== position._key) || null;
-    const decision = profitExitDecision(position, signal, env, peakPrice, bestAlternative);
+    const decision = profitExitDecision(position, signal, peakPrice, bestAlternative);
     if (!decision.exit) continue;
     try {
       const order = await placeProfitProtectCryptoSell(env, position, asset, signal, scheduledTime, decision);
@@ -417,12 +434,16 @@ export async function runCryptoCycle(env, scheduledTime) {
       actions.push({
         action: "crypto_buy",
         symbol: candidate.symbol,
-        reason: "highest_net_expected_edge_with_market_confirmation",
+        reason: "highest_probability_weighted_opportunity",
         score: round(candidate.score, 1),
         threshold,
         regime: regime.mode,
         shortTermMarketSupport: regime.shortTermSupport,
         crossMarketConfirmed: candidate.crossMarketConfirmed,
+        probability: round(candidate.probability, 3),
+        opportunityScore: round(candidate.opportunityScore, 6),
+        movementOpportunity: round(candidate.movementOpportunity, 5),
+        catalystScore: round(candidate.catalyst?.score || 0, 2),
         expectedNetEdgePct: round(candidate.entryEconomics.expectedNetEdge, 5),
         expectedGrossMovePct: round(candidate.entryEconomics.expectedGrossMove, 5),
         rewardToCost: round(candidate.entryEconomics.rewardToCost, 2),
@@ -455,15 +476,18 @@ export async function runCryptoCycle(env, scheduledTime) {
       scansAllQuoteMarkets: true,
       selectiveConviction: true,
       tradeVolumeObjective: false,
-      expectedNetEdgeRanking: true,
+      probabilityWeightedRanking: true,
+      movementOpportunityRanking: true,
+      catalystAware: true,
+      fixedProfitThreshold: false,
+      positiveNetEdgeRequired: true,
       opportunityCostExit: true,
       singleEngineOwnership: true,
       priceProtectedIocEntries: true,
       profitProtectedIocExits: true,
       fixedProfitTarget: false,
-      trailingProfitProtection: true,
+      dynamicProfitProtection: true,
       profitToLossGuard: true,
-      reentryBelowLastSell: false,
       normalLossTakingExits: false,
       costAwareEntries: true
     },
@@ -471,7 +495,7 @@ export async function runCryptoCycle(env, scheduledTime) {
     performance: { realizedPnl: round(perf.realizedPnl, 2), trades: perf.trades, wins: perf.wins, losses: perf.losses, winRate: round(perf.winRate, 4), profitFactor: round(perf.profitFactor, 3), expectancy: round(perf.expectancy, 2) },
     risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal },
     actions,
-    leaders: marketLeaders.slice(0, 8).map(s => ({ symbol: s.symbol, score: round(s.score, 1), expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0, 5), expectedGrossMovePct: round(s.entryEconomics?.expectedGrossMove || 0, 5), rewardToCost: round(s.entryEconomics?.rewardToCost || 0, 2), spreadPct: round(s.spreadPct, 5), bookImbalance: round(s.bookImbalance || 0, 3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), crossMarketConfirmed: s.crossMarketConfirmed }))
+    leaders: marketLeaders.slice(0, 8).map(s => ({ symbol: s.symbol, score: round(s.score, 1), probability: round(s.probability,3), opportunityScore: round(s.opportunityScore,6), movementOpportunity: round(s.movementOpportunity,5), catalystScore: round(s.catalyst?.score || 0,2), catalystHeadlines: (s.catalyst?.headlines || []).slice(0,2), expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0, 5), expectedGrossMovePct: round(s.entryEconomics?.expectedGrossMove || 0, 5), rewardToCost: round(s.entryEconomics?.rewardToCost || 0, 2), spreadPct: round(s.spreadPct, 5), bookImbalance: round(s.bookImbalance || 0, 3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), crossMarketConfirmed: s.crossMarketConfirmed }))
   };
   console.log(JSON.stringify({ event: "crypto_cycle_complete", ...result }));
   return result;
@@ -509,15 +533,18 @@ export async function cryptoStatus(env) {
       scansAllQuoteMarkets: true,
       selectiveConviction: true,
       tradeVolumeObjective: false,
-      expectedNetEdgeRanking: true,
+      probabilityWeightedRanking: true,
+      movementOpportunityRanking: true,
+      catalystAware: true,
+      fixedProfitThreshold: false,
+      positiveNetEdgeRequired: true,
       opportunityCostExit: true,
       singleEngineOwnership: true,
       priceProtectedIocEntries: true,
       profitProtectedIocExits: true,
       fixedProfitTarget: false,
-      trailingProfitProtection: true,
+      dynamicProfitProtection: true,
       profitToLossGuard: true,
-      reentryBelowLastSell: false,
       normalLossTakingExits: false,
       costAwareEntries: true
     },
@@ -526,11 +553,6 @@ export async function cryptoStatus(env) {
     maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 50000),
     orderNotionalUsd: num(env.CRYPTO_ORDER_NOTIONAL_USD, 25000),
     minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 94),
-    minExpectedNetEdgePct: pct(env.CRYPTO_MIN_EXPECTED_NET_EDGE_PCT, 0.01),
-    minRewardToCost: num(env.CRYPTO_MIN_REWARD_TO_COST, 2),
-    fixedProfitTargetPct: 0,
-    profitTrailMinGivebackPct: pct(env.CRYPTO_PROFIT_TRAIL_MIN_GIVEBACK_PCT, 0.0015),
-    profitTrailMaxGivebackPct: pct(env.CRYPTO_PROFIT_TRAIL_MAX_GIVEBACK_PCT, 0.008),
-    profitTrailGivebackFraction: num(env.CRYPTO_PROFIT_TRAIL_GIVEBACK_FRACTION, 0.35)
+    fixedProfitTargetPct: 0
   };
 }
