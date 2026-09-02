@@ -2,13 +2,14 @@ import { alpaca, marketDataRaw } from "./api.js";
 import { timeframeSignal, combineSignals } from "./signals.js";
 import { num, pct, int, clamp, round } from "./config.js";
 
-export const CRYPTO_STRATEGY = "crypto-revenue-v4";
-export const CRYPTO_ORDER_PREFIX = "papercrypto-v4-";
+export const CRYPTO_STRATEGY = "crypto-revenue-v5";
+export const CRYPTO_ORDER_PREFIX = "papercrypto-v5-";
 const FALLBACK = ["BTC/USD","ETH/USD","SOL/USD","DOGE/USD","LTC/USD","AVAX/USD","LINK/USD","BCH/USD","UNI/USD","AAVE/USD"];
 let universeCache = { at: 0, assets: [], source: "none" };
 
 const norm = s => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 const isCurrentOrder = o => String(o?.client_order_id || "").startsWith(CRYPTO_ORDER_PREFIX);
+const isAnyCryptoBotOrder = o => String(o?.client_order_id || "").startsWith("papercrypto-");
 const cid = (side, symbol, now, tag = "") => `${CRYPTO_ORDER_PREFIX}${side}-${tag}-${norm(symbol)}-${Number(now).toString(36)}`.slice(0, 48);
 const baseAsset = symbol => String(symbol || "").toUpperCase().split("/")[0];
 
@@ -176,21 +177,78 @@ function entryEconomics(signal, env) {
   return { roundTripCost, expectedGrossMove, expectedNetEdge, rewardToCost, ok: expectedNetEdge >= minNet && rewardToCost >= minRatio };
 }
 
-function profitExitDecision(position, signal, env) {
+function barTimeMs(bar) {
+  const t = bar?.t ?? bar?.timestamp ?? bar?.time;
+  const ms = typeof t === "number" ? (t > 1e12 ? t : t * 1000) : Date.parse(t || 0);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function barHigh(bar) {
+  return +(bar?.h ?? bar?.high ?? bar?.c ?? bar?.close ?? 0);
+}
+
+function latestEntryTimes(orders) {
+  const out = new Map();
+  for (const o of orders) {
+    if (!isAnyCryptoBotOrder(o) || o.side !== "buy" || o.status !== "filled") continue;
+    const at = Date.parse(o.filled_at || o.submitted_at || 0), key = norm(o.symbol);
+    if (!Number.isFinite(at)) continue;
+    const prev = out.get(key);
+    if (!prev || at > prev.at) out.set(key, { at, price: +(o.filled_avg_price || 0) });
+  }
+  return out;
+}
+
+function latestSellPrices(orders) {
+  const out = new Map();
+  for (const o of orders) {
+    if (!isAnyCryptoBotOrder(o) || o.side !== "sell" || o.status !== "filled") continue;
+    const at = Date.parse(o.filled_at || o.submitted_at || 0), key = norm(o.symbol), price = +(o.filled_avg_price || 0);
+    if (!Number.isFinite(at) || !(price > 0)) continue;
+    const prev = out.get(key);
+    if (!prev || at > prev.at) out.set(key, { at, price });
+  }
+  return out;
+}
+
+function peakPriceSinceEntry(entryPrice, currentPrice, entryMeta, bars1, bars5) {
+  let peak = Math.max(entryPrice || 0, currentPrice || 0);
+  const start = entryMeta?.at || 0;
+  if (!start) return peak;
+  for (const bar of [...(bars5 || []), ...(bars1 || [])]) {
+    if (barTimeMs(bar) + 300000 < start) continue;
+    peak = Math.max(peak, barHigh(bar));
+  }
+  return peak;
+}
+
+function profitExitDecision(position, signal, env, peakPrice) {
   const entry = +position.avg_entry_price || 0;
   const bid = +(signal?.bid || signal?.price || position.current_price || 0);
-  if (!(entry > 0 && bid > 0)) return { exit: false, reason: "hold_no_quote", pnlPct: 0, minimumSellPrice: 0 };
-  const fee = pct(env.CRYPTO_TAKER_FEE_PCT, 0.0025);
-  const exitSlip = pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT, 0.0015);
-  const minNet = pct(env.CRYPTO_MIN_REALIZED_NET_PROFIT_PCT, 0.0005);
-  const requiredGrossReturn = ((1 + fee) / Math.max(0.000001, 1 - fee - exitSlip)) - 1 + minNet;
-  const minimumSellPrice = entry * (1 + requiredGrossReturn);
+  if (!(entry > 0 && bid > 0)) return { exit: false, reason: "hold_no_quote", pnlPct: 0, peakPnlPct: 0, minimumSellPrice: entry };
+
   const pnlPct = bid / entry - 1;
+  const peak = Math.max(entry, +(peakPrice || 0), bid);
+  const peakPnlPct = peak / entry - 1;
+  if (!(pnlPct > 0)) return { exit: false, reason: peakPnlPct > 0 ? "hold_recovery_after_profit" : "hold_until_profitable", pnlPct, peakPnlPct, minimumSellPrice: entry };
+
+  const minGiveback = pct(env.CRYPTO_PROFIT_TRAIL_MIN_GIVEBACK_PCT, 0.0015);
+  const maxGiveback = pct(env.CRYPTO_PROFIT_TRAIL_MAX_GIVEBACK_PCT, 0.008);
+  const givebackFraction = clamp(num(env.CRYPTO_PROFIT_TRAIL_GIVEBACK_FRACTION, 0.35), 0.05, 0.9);
+  const givebackPct = clamp(Math.max(minGiveback, peakPnlPct * givebackFraction), minGiveback, maxGiveback);
+  const protectedPnlFloor = Math.max(0.000001, peakPnlPct - givebackPct);
+  const retracedFromHigh = peakPnlPct > 0 && pnlPct <= protectedPnlFloor;
+  const shortTermRollover = Boolean(signal && signal.s1?.ret1 < 0 && (signal.s1?.ret3 < 0 || signal.s5?.ret1 <= 0));
+  const meaningfulGiveback = peakPnlPct - pnlPct >= Math.max(0.0005, peakPnlPct * 0.2);
+  const exit = pnlPct > 0 && (retracedFromHigh || (shortTermRollover && meaningfulGiveback));
   return {
-    exit: bid >= minimumSellPrice,
-    reason: bid >= minimumSellPrice ? "net_profit_available" : "hold_for_net_profit",
+    exit,
+    reason: exit ? (retracedFromHigh ? "profit_trailing_reversal" : "profit_momentum_reversal") : "ride_profit_higher",
     pnlPct,
-    minimumSellPrice
+    peakPnlPct,
+    givebackPct,
+    protectedPnlFloor,
+    minimumSellPrice: entry
   };
 }
 
@@ -246,25 +304,22 @@ async function placeCryptoBuy(env, candidate, asset, notional, now) {
   });
 }
 
-async function placeProfitableCryptoSell(env, position, asset, signal, now, decision) {
+async function placeProfitProtectCryptoSell(env, position, asset, signal, now, decision) {
   const symbol = signal?.symbol || asset?.symbol || position.symbol;
   const qty = formatSellQty(Math.abs(+position.qty || 0), asset);
   if (!(+qty > 0)) throw new Error("crypto_exit_quantity_too_small");
-  const limitPrice = formatLimitPrice(decision.minimumSellPrice, asset);
+  const entry = +position.avg_entry_price || 0;
+  const bid = +(signal?.bid || signal?.price || position.current_price || 0);
+  const inc = Math.max(1e-12, +(asset?.price_increment || 0.00000001));
+  const profitFloor = entry + inc;
+  if (!(bid > profitFloor)) throw new Error("crypto_profit_disappeared_before_exit");
+  const slip = pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT, 0.0015);
+  const marketableFloor = bid * (1 - slip);
+  const limitPrice = formatLimitPrice(Math.max(profitFloor, marketableFloor), asset);
   return alpaca(env, "/v2/orders", {
     method: "POST",
-    body: JSON.stringify({ symbol, qty, side: "sell", type: "limit", limit_price: limitPrice, time_in_force: "ioc", client_order_id: cid("sell", symbol, now, "profit") })
+    body: JSON.stringify({ symbol, qty, side: "sell", type: "limit", limit_price: limitPrice, time_in_force: "ioc", client_order_id: cid("sell", symbol, now, decision.reason === "profit_trailing_reversal" ? "trail" : "roll") })
   });
-}
-
-function recentCooldowns(orders, now, minutes) {
-  const cutoff = +now - minutes * 60000, blocked = new Set();
-  for (const o of orders) {
-    if (!isCurrentOrder(o) || o.side !== "sell" || o.status !== "filled") continue;
-    const t = Date.parse(o.filled_at || 0);
-    if (Number.isFinite(t) && t >= cutoff) blocked.add(norm(o.symbol));
-  }
-  return blocked;
 }
 
 export async function runCryptoCycle(env, scheduledTime) {
@@ -308,6 +363,8 @@ export async function runCryptoCycle(env, scheduledTime) {
   ]);
 
   const currentOpen = new Set(openOrders.filter(isCurrentOrder).map(o => norm(o.symbol)));
+  const entryTimes = latestEntryTimes(recentOrders);
+  const lastSells = latestSellPrices(recentOrders);
   const botPositions = (Array.isArray(positions) ? positions : []).flatMap(p => {
     const key = norm(p.symbol), asset = assetByNorm.get(key), signal = signalByNorm.get(key);
     if (!asset) return [];
@@ -320,14 +377,17 @@ export async function runCryptoCycle(env, scheduledTime) {
   for (const position of botPositions) {
     if (currentOpen.has(position._key)) continue;
     const signal = signalByNorm.get(position._key);
-    const decision = profitExitDecision(position, signal, env);
+    const asset = assetByNorm.get(position._key);
+    const symbol = signal?.symbol || asset?.symbol;
+    const peakPrice = peakPriceSinceEntry(+position.avg_entry_price || 0, +(signal?.bid || signal?.price || position.current_price || 0), entryTimes.get(position._key), b1[symbol] || [], b5[symbol] || []);
+    const decision = profitExitDecision(position, signal, env, peakPrice);
     if (!decision.exit) continue;
     try {
-      const order = await placeProfitableCryptoSell(env, position, assetByNorm.get(position._key), signal, scheduledTime, decision);
-      actions.push({ action: "crypto_sell", symbol: signal?.symbol || position.symbol, reason: decision.reason, pnlPct: round(decision.pnlPct, 5), minimumSellPrice: round(decision.minimumSellPrice, 10), orderStatus: order?.status || null });
+      const order = await placeProfitProtectCryptoSell(env, position, asset, signal, scheduledTime, decision);
+      actions.push({ action: "crypto_sell", symbol: signal?.symbol || position.symbol, reason: decision.reason, pnlPct: round(decision.pnlPct, 5), peakPnlPct: round(decision.peakPnlPct, 5), orderStatus: order?.status || null, limitPrice: +(order?.limit_price || 0) });
       currentOpen.add(position._key);
     } catch (error) {
-      console.log(JSON.stringify({ event: "crypto_exit_failed", symbol: position.symbol, message: error.message }));
+      console.log(JSON.stringify({ event: "crypto_exit_failed", symbol: position.symbol, reason: decision.reason, message: error.message }));
     }
   }
 
@@ -336,14 +396,17 @@ export async function runCryptoCycle(env, scheduledTime) {
   const maxSpread = pct(env.CRYPTO_MAX_SPREAD_PCT, 0.004);
   const maxAge = int(env.CRYPTO_MAX_QUOTE_AGE_SECONDS, 20);
   const occupied = new Set(botPositions.map(p => p._key));
-  const cooldowns = recentCooldowns(recentOrders, scheduledTime, int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10));
 
   const ranked = signals.filter(s => {
     const key = norm(s.symbol);
     const economics = entryEconomics(s, env);
+    const priorSell = lastSells.get(key);
+    const reentryBelowSell = !priorSell || (s.ask > 0 && s.ask < priorSell.price);
     s.entryEconomics = economics;
+    s.lastSellPrice = priorSell?.price || 0;
+    s.reentryBelowLastSell = reentryBelowSell;
     return String(s.symbol).toUpperCase().endsWith("/USD") &&
-      !occupied.has(key) && !currentOpen.has(key) && !cooldowns.has(key) &&
+      !occupied.has(key) && !currentOpen.has(key) && reentryBelowSell &&
       s.longConfirmed && !s.chop && s.score >= threshold && s.price > 0 &&
       s.bidDepthUsd >= minDepth && s.askDepthUsd >= minDepth &&
       s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge && economics.ok;
@@ -365,13 +428,15 @@ export async function runCryptoCycle(env, scheduledTime) {
       actions.push({
         action: "crypto_buy",
         symbol: candidate.symbol,
-        reason: "ranked_uptrend_expected_net_edge",
+        reason: candidate.lastSellPrice > 0 ? "confirmed_reentry_below_last_sell" : "ranked_uptrend_expected_net_edge",
         score: round(candidate.score, 1),
         threshold,
         regime: regime.mode,
         crossMarketConfirmed: candidate.crossMarketConfirmed,
         expectedNetEdgePct: round(candidate.entryEconomics.expectedNetEdge, 5),
         rewardToCost: round(candidate.entryEconomics.rewardToCost, 2),
+        lastSellPrice: round(candidate.lastSellPrice, 10),
+        entryAsk: round(candidate.ask, 10),
         notional: round(notional, 2),
         orderStatus: order?.status || null,
         limitPrice: +(order?.limit_price || 0)
@@ -401,6 +466,10 @@ export async function runCryptoCycle(env, scheduledTime) {
       singleEngineOwnership: true,
       priceProtectedIocEntries: true,
       profitProtectedIocExits: true,
+      fixedProfitTarget: false,
+      trailingProfitProtection: true,
+      profitToLossGuard: true,
+      reentryBelowLastSell: true,
       normalLossTakingExits: false,
       costAwareEntries: true
     },
@@ -408,7 +477,7 @@ export async function runCryptoCycle(env, scheduledTime) {
     performance: { realizedPnl: round(perf.realizedPnl, 2), trades: perf.trades, wins: perf.wins, losses: perf.losses, winRate: round(perf.winRate, 4), profitFactor: round(perf.profitFactor, 3), expectancy: round(perf.expectancy, 2) },
     risk: { exposure: round(currentExposure, 2), maxExposure: maxTotal },
     actions,
-    leaders: ranked.slice(0, 8).map(s => ({ symbol: s.symbol, score: round(s.score, 1), spreadPct: round(s.spreadPct, 5), bookImbalance: round(s.bookImbalance || 0, 3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), crossMarketConfirmed: s.crossMarketConfirmed, expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0, 5) }))
+    leaders: ranked.slice(0, 8).map(s => ({ symbol: s.symbol, score: round(s.score, 1), spreadPct: round(s.spreadPct, 5), bookImbalance: round(s.bookImbalance || 0, 3), h1Trend: Boolean(s.h1?.trend), h4Trend: Boolean(s.h4?.trend), crossMarketConfirmed: s.crossMarketConfirmed, expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0, 5), lastSellPrice: round(s.lastSellPrice || 0, 10), reentryBelowLastSell: s.reentryBelowLastSell }))
   };
   console.log(JSON.stringify({ event: "crypto_cycle_complete", ...result }));
   return result;
@@ -446,6 +515,10 @@ export async function cryptoStatus(env) {
       singleEngineOwnership: true,
       priceProtectedIocEntries: true,
       profitProtectedIocExits: true,
+      fixedProfitTarget: false,
+      trailingProfitProtection: true,
+      profitToLossGuard: true,
+      reentryBelowLastSell: true,
       normalLossTakingExits: false,
       costAwareEntries: true
     },
@@ -453,7 +526,9 @@ export async function cryptoStatus(env) {
     maxConcurrentPositions: int(env.CRYPTO_MAX_CONCURRENT_POSITIONS, 4),
     maxTotalExposureUsd: num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD, 4000),
     minEntryScore: num(env.CRYPTO_MIN_ENTRY_SCORE, 82),
-    minRealizedNetProfitPct: pct(env.CRYPTO_MIN_REALIZED_NET_PROFIT_PCT, 0.0005),
-    symbolCooldownMinutes: int(env.CRYPTO_SYMBOL_COOLDOWN_MINUTES, 10)
+    fixedProfitTargetPct: 0,
+    profitTrailMinGivebackPct: pct(env.CRYPTO_PROFIT_TRAIL_MIN_GIVEBACK_PCT, 0.0015),
+    profitTrailMaxGivebackPct: pct(env.CRYPTO_PROFIT_TRAIL_MAX_GIVEBACK_PCT, 0.008),
+    profitTrailGivebackFraction: num(env.CRYPTO_PROFIT_TRAIL_GIVEBACK_FRACTION, 0.35)
   };
 }
