@@ -8,14 +8,18 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Read current production crypto state
+      - name: Read current production trading state
         shell: bash
         run: |
           set -euo pipefail
           BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
           LIVE="$(curl --fail --silent --show-error --max-time 35 "$BASE/api/crypto/live")"
           STATUS="$(curl --fail --silent --show-error --max-time 35 "$BASE/api/crypto/status")"
+          STATE="$(curl --fail --silent --show-error --max-time 35 "$BASE/api/state")"
+          BOT="$(curl --fail --silent --show-error --max-time 35 "$BASE/api/status")"
           echo "CRYPTO_LIVE=$LIVE"
           echo "CRYPTO_STATUS=$STATUS"
+          echo "TRADING_STATE=$STATE"
+          echo "BOT_STATUS=$BOT"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} build=${x.cryptoEntryBuild} positions=${x.cryptoPositionCount} current_orders=${x.currentStrategyOrderCount} legacy_history=${x.legacyHistoricalOrderCount}`); if(x.strategy!=="crypto-revenue-v4" || x.cryptoEntryBuild!=="crypto-revenue-v4" || x.exitPolicy!=="normal_exits_require_net_profit" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(7)' "$LIVE"
           node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{}; console.log(`universe=${x.universeCount} unique=${x.uniqueCryptoAssets} quotes=${JSON.stringify(x.quoteMarkets)} all=${x.allActiveTradablePairs} profit_exits=${r.profitProtectedIocExits} loss_exits=${r.normalLossTakingExits}`); if(x.strategy!=="crypto-revenue-v4" || x.cryptoEntryBuild!=="crypto-revenue-v4" || !(x.universeCount>=73) || x.allActiveTradablePairs!==true || !["USD","USDC","USDT","BTC"].every(q=>(x.quoteMarkets||[]).includes(q)) || r.singleEngineOwnership!==true || r.profitProtectedIocExits!==true || r.normalLossTakingExits!==false) process.exit(8)' "$STATUS"
