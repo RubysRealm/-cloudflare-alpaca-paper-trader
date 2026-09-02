@@ -4,7 +4,7 @@ import { alpaca } from "./api.js";
 
 export { TradingState };
 
-const CRYPTO_ENTRY_BUILD = "crypto-revenue-v4";
+const CRYPTO_ENTRY_BUILD = "crypto-revenue-v5";
 
 function cryptoOrderPerformance(orders) {
   const inv = {}, closed = [];
@@ -58,7 +58,7 @@ async function cryptoLiveState(env) {
     strategy: CRYPTO_STRATEGY,
     cryptoEntryBuild: CRYPTO_ENTRY_BUILD,
     orderPrefix: CRYPTO_ORDER_PREFIX,
-    exitPolicy: "normal_exits_require_net_profit",
+    exitPolicy: "trail_profit_then_reenter_lower",
     legacyExecutionActive: false,
     cryptoAccountStatus: account?.crypto_status || null,
     cryptoPositionCount: meaningful.length,
