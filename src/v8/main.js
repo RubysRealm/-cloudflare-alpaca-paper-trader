@@ -1,15 +1,10 @@
 import stockApp, { TradingState } from "./index.js";
-import { runCryptoCycle, cryptoStatus } from "./crypto.js";
-import { cryptoOpportunityProbe } from "./crypto-opportunity.js";
+import { runCryptoCycle, cryptoStatus, CRYPTO_STRATEGY, CRYPTO_ORDER_PREFIX } from "./crypto-revenue.js";
 import { alpaca } from "./api.js";
 
 export { TradingState };
 
-const CRYPTO_ENTRY_BUILD = "crypto-professional-v3";
-
-function cryptoExecutionEnv(env) {
-  return { ...env, CRYPTO_MIN_DOLLAR_VOLUME_USD: "0" };
-}
+const CRYPTO_ENTRY_BUILD = "crypto-revenue-v4";
 
 function cryptoOrderPerformance(orders) {
   const inv = {}, closed = [];
@@ -44,7 +39,9 @@ async function cryptoLiveState(env) {
     alpaca(env, "/v2/orders?status=all&limit=500&direction=desc&nested=false"),
     alpaca(env, "/v2/account")
   ]);
-  const cryptoOrders = (Array.isArray(orders) ? orders : []).filter(o => String(o.client_order_id || "").startsWith("papercrypto-"));
+  const allBotOrders = (Array.isArray(orders) ? orders : []).filter(o => String(o.client_order_id || "").startsWith("papercrypto-"));
+  const currentOrders = allBotOrders.filter(o => String(o.client_order_id || "").startsWith(CRYPTO_ORDER_PREFIX));
+  const legacyOrders = allBotOrders.filter(o => !String(o.client_order_id || "").startsWith(CRYPTO_ORDER_PREFIX));
   const rawCryptoPositions = (Array.isArray(positions) ? positions : []).filter(p => String(p.asset_class || "").toLowerCase() === "crypto" || String(p.symbol || "").includes("/"));
   const cryptoPositions = rawCryptoPositions.map(p => ({
     symbol: p.symbol,
@@ -58,16 +55,21 @@ async function cryptoLiveState(env) {
   const meaningful = cryptoPositions.filter(p => Math.abs(p.marketValue || p.qty * p.currentPrice) > 1);
   return {
     endpoint: "paper",
+    strategy: CRYPTO_STRATEGY,
     cryptoEntryBuild: CRYPTO_ENTRY_BUILD,
+    orderPrefix: CRYPTO_ORDER_PREFIX,
+    exitPolicy: "normal_exits_require_net_profit",
+    legacyExecutionActive: false,
     cryptoAccountStatus: account?.crypto_status || null,
     cryptoPositionCount: meaningful.length,
     rawCryptoPositionCount: cryptoPositions.length,
     cryptoPositions: meaningful,
     dustPositions: cryptoPositions.filter(p => Math.abs(p.marketValue || p.qty * p.currentPrice) <= 1),
-    cryptoBotOrderCount: cryptoOrders.length,
-    lastCryptoBotOrderAt: cryptoOrders[0]?.submitted_at || null,
-    performance: cryptoOrderPerformance(cryptoOrders),
-    recentCryptoBotOrders: cryptoOrders.slice(0, 20).map(o => ({
+    currentStrategyOrderCount: currentOrders.length,
+    legacyHistoricalOrderCount: legacyOrders.length,
+    lastCurrentStrategyOrderAt: currentOrders[0]?.submitted_at || null,
+    performance: cryptoOrderPerformance(currentOrders),
+    recentCurrentStrategyOrders: currentOrders.slice(0, 20).map(o => ({
       symbol: o.symbol,
       side: o.side,
       type: o.type,
@@ -88,15 +90,11 @@ const app = {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/api/crypto/status") {
       try { return Response.json({ ...(await cryptoStatus(env)), cryptoEntryBuild: CRYPTO_ENTRY_BUILD }, { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ strategy: "crypto-profitability-v1", enabled: false, endpoint: "paper", market: "24x7", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ strategy: CRYPTO_STRATEGY, enabled: false, endpoint: "paper", market: "24x7", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     if (request.method === "GET" && url.pathname === "/api/crypto/live") {
       try { return Response.json(await cryptoLiveState(env), { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
-    }
-    if (request.method === "GET" && url.pathname === "/api/crypto/opportunity") {
-      try { return Response.json({ ...(await cryptoOpportunityProbe(cryptoExecutionEnv(env))), cryptoEntryBuild: CRYPTO_ENTRY_BUILD, diagnosticOnly: true }, { headers: { "Cache-Control": "no-store" } }); }
-      catch (error) { return Response.json({ endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
+      catch (error) { return Response.json({ strategy: CRYPTO_STRATEGY, endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
     return stockApp.fetch(request, env, ctx);
   },
