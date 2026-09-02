@@ -150,3 +150,41 @@ export async function recentNewsRisk(env, symbols, now) {
     return blocked;
   } catch (e) { console.log(JSON.stringify({ event: "news_filter_degraded", message: e.message })); return new Set(); }
 }
+
+export async function recentNewsContext(env, symbols, now, lookbackMinutes = 120) {
+  const requested = [...new Set((symbols || []).map(s => String(s || "").toUpperCase().replace("/", "")).filter(Boolean))];
+  const out = new Map(requested.map(s => [s, { score: 0, positive: 0, negative: 0, severe: false, headlines: [] }]));
+  if (!requested.length) return out;
+  const start = new Date(Number(now) - Math.max(15, lookbackMinutes) * 60000).toISOString();
+  const positiveRx = /beat(s|ing)? estimates|raises? guidance|raised guidance|record revenue|record sales|approval|approved|fda approval|contract award|wins? contract|partnership|strategic partnership|acquisition|acquire|buyback|repurchase|upgrade|price target raised|breakthrough|launch|expands?|surges?|strong demand|outperform|positive trial|settlement approved/i;
+  const negativeRx = /miss(es|ed)? estimates|cuts? guidance|lowered guidance|downgrade|price target cut|offering|dilution|investigation|probe|lawsuit|recall|hack|exploit|breach|outage|liquidation|default|bankruptcy|chapter 11|delist|fraud|halted|trading halt|weak demand|restructuring|layoffs?|regulatory action|sec charges/i;
+  const severeRx = /bankruptcy|chapter 11|delist|fraud|trading halt|halted|default|hack|exploit|sec charges|accounting investigation/i;
+  try {
+    for (let i = 0; i < requested.length; i += 40) {
+      const batch = requested.slice(i, i + 40);
+      const d = await marketDataRaw(env, `/v1beta1/news?symbols=${batch.join(",")}&start=${encodeURIComponent(start)}&limit=50&sort=desc`);
+      for (const article of d?.news || []) {
+        const text = `${article.headline || ""} ${article.summary || ""}`;
+        const at = Date.parse(article.created_at || article.updated_at || 0);
+        const ageMinutes = Number.isFinite(at) ? Math.max(0, (Number(now) - at) / 60000) : lookbackMinutes;
+        const freshness = Math.max(0.25, 1 - ageMinutes / Math.max(30, lookbackMinutes * 1.25));
+        const positive = positiveRx.test(text), negative = negativeRx.test(text), severe = severeRx.test(text);
+        const impact = (positive ? 6 : 0) - (negative ? 8 : 0) - (severe ? 12 : 0);
+        for (const raw of article.symbols || []) {
+          const key = String(raw || "").toUpperCase().replace("/", "");
+          const x = out.get(key);
+          if (!x) continue;
+          x.score += impact * freshness;
+          if (positive) x.positive++;
+          if (negative) x.negative++;
+          if (severe) x.severe = true;
+          if (x.headlines.length < 3) x.headlines.push(String(article.headline || "").slice(0, 180));
+        }
+      }
+    }
+  } catch (e) {
+    console.log(JSON.stringify({ event: "news_context_degraded", message: e.message }));
+  }
+  for (const x of out.values()) x.score = Math.max(-30, Math.min(20, x.score));
+  return out;
+}
