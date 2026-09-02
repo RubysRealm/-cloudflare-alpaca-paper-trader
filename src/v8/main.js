@@ -1,10 +1,10 @@
 import stockApp, { TradingState } from "./index.js";
-import { runCryptoCycle, cryptoStatus, CRYPTO_STRATEGY, CRYPTO_ORDER_PREFIX } from "./crypto-revenue.js";
+import { runCryptoCycle, cryptoStatus, CRYPTO_STRATEGY, CRYPTO_ORDER_PREFIX } from "./crypto-conviction.js";
 import { alpaca } from "./api.js";
 
 export { TradingState };
 
-const CRYPTO_ENTRY_BUILD = "crypto-revenue-v5";
+const CRYPTO_ENTRY_BUILD = "crypto-conviction-v6";
 
 function cryptoOrderPerformance(orders) {
   const inv = {}, closed = [];
@@ -58,7 +58,7 @@ async function cryptoLiveState(env) {
     strategy: CRYPTO_STRATEGY,
     cryptoEntryBuild: CRYPTO_ENTRY_BUILD,
     orderPrefix: CRYPTO_ORDER_PREFIX,
-    exitPolicy: "trail_profit_then_reenter_lower",
+    exitPolicy: "selective_conviction_profit_rotation",
     legacyExecutionActive: false,
     cryptoAccountStatus: account?.crypto_status || null,
     cryptoPositionCount: meaningful.length,
