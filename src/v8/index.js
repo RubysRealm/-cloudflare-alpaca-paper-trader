@@ -30,12 +30,19 @@ function stockEconomics(signal, env) {
 function deepenStockSignal(base, h1, env) {
   if (!base?.valid) return base;
   const h1Valid = Boolean(h1?.valid);
-  const higherBoost = !h1Valid ? -18 : (h1.trend ? 12 : h1.downTrend ? -18 : 0) + (h1.trendSlope ? 6 : h1.downSlope ? -7 : 0) + (h1.aboveVwap ? 4 : 0);
+  const higherBoost = !h1Valid ? -14 : (h1.trend ? 12 : h1.downTrend ? -16 : 0) + (h1.trendSlope ? 6 : h1.downSlope ? -7 : 0) + (h1.aboveVwap ? 4 : 0);
   const convictionScore = base.score + higherBoost + (base.longAligned ? 6 : 0);
-  const higherTimeframeConfirmed = Boolean(h1Valid && !h1.downTrend && (h1.trend || h1.trendSlope) && h1.price >= Math.min(h1.ema9, h1.ema21));
-  const out = { ...base, h1, convictionScore, higherTimeframeConfirmed };
+  const higherTimeframeConfirmed = Boolean(h1Valid && !h1.downTrend && (h1.trend || h1.trendSlope || h1.price >= h1.ema21));
+  const flow = Boolean(
+    (base.s1?.ret1 > 0 && base.s1?.ret3 > 0) ||
+    (base.s5?.ret1 > 0 && base.s5?.ret3 > 0) ||
+    (base.s5?.ret3 > 0 && base.s15?.ret3 > 0)
+  );
+  const setup = Boolean(base.longContinuation || base.s5?.pullback || base.s5?.breakout || base.s5?.momentum || base.trendVotes >= 5);
+  const notOverextended = (base.rsi ?? 50) < 86;
+  const out = { ...base, h1, convictionScore, higherTimeframeConfirmed, opportunityFlow: flow, opportunitySetup: setup };
   out.entryEconomics = stockEconomics(out, env);
-  out.convictionConfirmed = Boolean(base.longConfirmed && higherTimeframeConfirmed && out.entryEconomics.ok);
+  out.convictionConfirmed = Boolean(higherTimeframeConfirmed && flow && setup && base.trendVotes >= 4 && notOverextended && out.entryEconomics.ok);
   return out;
 }
 
@@ -43,9 +50,11 @@ function applyOpportunityResearch(signal, news) {
   const catalystScore = news?.score || 0;
   const adjustedConviction = signal.convictionScore + catalystScore;
   const probability = clamp(
-    0.46 + Math.max(0, adjustedConviction - 82) * 0.0045 + (signal.trendVotes || 0) * 0.018 +
-    (signal.h1?.trend ? 0.055 : 0) + (signal.longAligned ? 0.04 : 0) + clamp(catalystScore / 100, -0.18, 0.12),
-    0.25, 0.93
+    0.43 + Math.max(0, adjustedConviction - 65) * 0.0042 + (signal.trendVotes || 0) * 0.02 +
+    (signal.h1?.trend ? 0.055 : 0) + (signal.longAligned ? 0.035 : 0) +
+    (signal.opportunityFlow ? 0.045 : 0) + (signal.opportunitySetup ? 0.035 : 0) +
+    clamp(catalystScore / 100, -0.18, 0.12),
+    0.20, 0.93
   );
   const movementOpportunity = Math.max(
     signal.atrPct || 0,
@@ -53,31 +62,16 @@ function applyOpportunityResearch(signal, news) {
     Math.max(0, signal.s5?.ret3 || 0) * 1.25,
     Math.max(0, signal.s15?.ret3 || 0)
   );
-  const movementMultiplier = 1 + clamp(movementOpportunity * 45, 0, 2.25);
+  const movementMultiplier = 1 + clamp(movementOpportunity * 50, 0, 2.75);
   const opportunityScore = Math.max(0, signal.entryEconomics?.expectedNetEdge || 0) * probability * movementMultiplier;
   return { ...signal, convictionScore: adjustedConviction, probability, movementOpportunity, opportunityScore, catalyst: news || { score: 0, positive: 0, negative: 0, severe: false, headlines: [] } };
-}
-
-function requiredScore(candidate, regime, learning, env) {
-  const base = Math.max(num(env.MIN_ENTRY_SCORE, 94), learning.scoreThreshold || 0);
-  const bucket = directionBucket(candidate.symbol);
-  if (bucket === "inverse") {
-    if (regime.mode === "bear") return base;
-    if (regime.mode === "sideways" && regime.breadth <= -0.08) return base + 6;
-    return Infinity;
-  }
-  if (bucket === "bull_leveraged") return regime.mode === "bull" ? base + 3 : Infinity;
-  if (regime.mode === "bull") return base;
-  if (regime.mode === "sideways") return base + 6;
-  if (regime.mode === "bear") return base + 14;
-  return base + 8;
 }
 
 function regimeExit(position, signal, regime) {
   const bucket = directionBucket(position.symbol);
   if (bucket === "inverse" && regime.mode === "bull") return "regime_conflict";
   if (bucket === "bull_leveraged" && regime.mode !== "bull") return "regime_conflict";
-  if (bucket === "regular" && regime.mode === "bear" && (!signal || signal.convictionScore < 108 || !signal.longAligned)) return "regime_weakness";
+  if (bucket === "regular" && regime.mode === "bear" && (!signal || signal.convictionScore < 90 || !signal.higherTimeframeConfirmed)) return "regime_weakness";
   return null;
 }
 
@@ -92,10 +86,10 @@ function selectiveExitDecision(position, signal, regime, bestAlternative, env, s
 
   if (pnlPct > 0) {
     const rollover = Boolean(signal && signal.s1?.ret1 < 0 && (signal.s1?.ret3 < 0 || signal.s5?.ret1 <= 0));
-    const convictionFading = Boolean(!signal?.convictionConfirmed || signal.convictionScore < num(env.MIN_ENTRY_SCORE, 94) || signal.catalyst?.severe);
+    const convictionFading = Boolean(!signal?.higherTimeframeConfirmed || !signal?.opportunityFlow || signal.catalyst?.severe);
     const currentOpportunity = signal?.opportunityScore || 0;
     const alternativeOpportunity = bestAlternative?.opportunityScore || 0;
-    const materiallyBetter = Boolean(bestAlternative && bestAlternative.symbol !== position.symbol && alternativeOpportunity > currentOpportunity * 1.25);
+    const materiallyBetter = Boolean(bestAlternative && bestAlternative.symbol !== position.symbol && alternativeOpportunity > Math.max(currentOpportunity * 1.25, currentOpportunity + 0.00015));
     if (materiallyBetter) return { exit: true, reason: "rotate_stronger_opportunity", pnlPct };
     if (rollover || convictionFading) return { exit: true, reason: "profit_edge_fading", pnlPct };
     return { exit: false, reason: "hold_best_opportunity", pnlPct };
@@ -149,12 +143,12 @@ async function runCycle(env, scheduledTime) {
   const news = await recentNewsContext(env, baseSignals.map(s => s.symbol), scheduledTime, 120);
   const signals = baseSignals.map(s => applyOpportunityResearch(s, news.get(s.symbol)));
   const map = new Map(signals.map(s => [s.symbol, s]));
-  const maxSpread = pct(env.MAX_SPREAD_PCT, 0.003), maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20), minDollarVolume = num(env.MIN_DOLLAR_VOLUME_USD, 10_000_000), minQuoteSize = num(env.MIN_QUOTE_SIZE, 1), minPrice = num(env.MIN_PRICE_USD, 1);
+  const maxSpread = pct(env.MAX_SPREAD_PCT, 0.003), maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20), minDollarVolume = num(env.MIN_DOLLAR_VOLUME_USD, 5_000_000), minQuoteSize = num(env.MIN_QUOTE_SIZE, 1), minPrice = num(env.MIN_PRICE_USD, 1);
 
   const marketLeaders = signals.filter(s =>
     !s.halted && !s.nearLuld && !s.catalyst?.severe && s.price >= minPrice && s.dollarVolume >= minDollarVolume &&
     s.bidSize >= minQuoteSize && s.askSize >= minQuoteSize && s.spreadPct <= maxSpread && s.quoteAgeSec <= maxAge &&
-    !s.chop && s.convictionConfirmed && s.entryEconomics?.ok
+    s.convictionConfirmed && s.entryEconomics?.ok && (!s.chop || s.movementOpportunity >= 0.004 || (s.catalyst?.positive || 0) > 0)
   ).sort((a, b) => (b.opportunityScore - a.opportunityScore) || (b.probability - a.probability) || (b.convictionScore - a.convictionScore));
 
   const [positions, openOrders, recentOrders, account] = await Promise.all([
@@ -200,7 +194,7 @@ async function runCycle(env, scheduledTime) {
   const epochOrders = strategyEpochOrders(recentOrders, env);
   const perf = calculatePerformanceDetailed(epochOrders);
   const daily = todayPerformance(epochOrders, scheduledTime);
-  const learn = adaptiveLearning(perf, num(env.MIN_ENTRY_SCORE, 94));
+  const learn = adaptiveLearning(perf, num(env.MIN_ENTRY_SCORE, 82));
   const dailyLoss = daily.realizedPnl <= -(equity * pct(env.MAX_DAILY_LOSS_PCT, 0.0125));
   const lossCount = daily.losses >= int(env.MAX_DAILY_LOSING_EXITS, 4);
   const consec = daily.maxConsecLoss >= int(env.MAX_CONSECUTIVE_LOSSES, 3);
@@ -217,26 +211,28 @@ async function runCycle(env, scheduledTime) {
   let inverseHeld = botPositions.some(p => INVERSE.has(p.symbol));
   let directionalHeld = botPositions.some(p => !INVERSE.has(p.symbol));
 
-  for (const candidate of ranked) {
+  for (let rank = 0; rank < ranked.length; rank++) {
+    const candidate = ranked[rank];
     if (!canRisk || slots <= 0 || remaining < 1 || newEntries >= maxNew) break;
-    const threshold = requiredScore(candidate, regime, learn, env);
-    if (!Number.isFinite(threshold) || candidate.convictionScore < threshold) continue;
 
     const bucket = directionBucket(candidate.symbol);
     if (bucket === "inverse" && directionalHeld) continue;
     if (bucket !== "inverse" && inverseHeld) continue;
+    if (bucket === "inverse" && !(regime.mode === "bear" || (regime.mode === "sideways" && regime.breadth < -0.03))) continue;
+    if (bucket === "bull_leveraged" && regime.mode === "bear") continue;
     if (TECH.has(candidate.symbol) && techCount >= int(env.MAX_TECH_POSITIONS, 2)) continue;
 
     let asset = assetCache.get(candidate.symbol);
     if (asset === undefined) { asset = await fetchAsset(env, candidate.symbol); assetCache.set(candidate.symbol, asset); }
     if (!asset || asset.tradable === false || asset.fractionable === false || asset.status === "inactive") continue;
 
-    const sized = { ...candidate, score: candidate.convictionScore };
-    const notional = Math.min(positionNotional(equity, sized, env, learn, dd), remaining, buyingPower);
+    const sized = { ...candidate, score: Math.max(70, candidate.convictionScore) };
+    const convictionScale = clamp(0.75 + candidate.probability * 0.45 + Math.min(0.35, candidate.movementOpportunity * 18), 0.75, 1.35);
+    const notional = Math.min(positionNotional(equity, sized, env, learn, dd) * convictionScale, num(env.MAX_POSITION_USD, 35000), remaining, buyingPower);
     if (notional < 1) continue;
     try {
       await placeLimitBuy(env, candidate, notional, scheduledTime);
-      actions.push({ action: "buy", symbol: candidate.symbol, reason: "highest_probability_weighted_opportunity", convictionScore: round(candidate.convictionScore, 1), threshold: round(threshold, 1), regime: regime.mode, probability: round(candidate.probability, 3), opportunityScore: round(candidate.opportunityScore, 6), expectedNetEdgePct: round(candidate.entryEconomics.expectedNetEdge, 5), expectedGrossMovePct: round(candidate.entryEconomics.expectedGrossMove, 5), movementOpportunity: round(candidate.movementOpportunity, 5), catalystScore: round(candidate.catalyst?.score || 0, 2), spreadPct: round(candidate.spreadPct, 5), notional: round(notional, 2) });
+      actions.push({ action: "buy", symbol: candidate.symbol, reason: "best_relative_probability_weighted_opportunity", relativeRank: rank + 1, convictionScore: round(candidate.convictionScore, 1), regime: regime.mode, probability: round(candidate.probability, 3), opportunityScore: round(candidate.opportunityScore, 6), expectedNetEdgePct: round(candidate.entryEconomics.expectedNetEdge, 5), expectedGrossMovePct: round(candidate.entryEconomics.expectedGrossMove, 5), movementOpportunity: round(candidate.movementOpportunity, 5), catalystScore: round(candidate.catalyst?.score || 0, 2), spreadPct: round(candidate.spreadPct, 5), notional: round(notional, 2) });
       slots--; remaining -= notional; newEntries++; botOpen.add(candidate.symbol);
       if (TECH.has(candidate.symbol)) techCount++;
       if (bucket === "inverse") inverseHeld = true; else directionalHeld = true;
@@ -245,10 +241,10 @@ async function runCycle(env, scheduledTime) {
     }
   }
 
-  const journal = { event: "decision_journal", ts: new Date(+scheduledTime).toISOString(), strategy: STRATEGY, feed: snap.feed, regime, learning: learn, perf: { trades: perf.trades, winRate: round(perf.winRate, 3), profitFactor: round(perf.profitFactor, 2), expectancy: round(perf.expectancy, 4) }, daily: { pnl: round(daily.realizedPnl, 2), losses: daily.losses, maxConsecLoss: daily.maxConsecLoss }, risk: { intradayDrawdown: round(intradayDraw, 4), highWaterDrawdown: round(highWaterDraw, 4), drawdownMultiplier: dd, dailyLossGuard: dailyLoss, lossCountGuard: lossCount, consecutiveLossGuard: consec, exposure: round(currentExposure, 2), maxExposure: maxTotal }, leaders: marketLeaders.slice(0, 10).map(s => ({ symbol: s.symbol, convictionScore: round(s.convictionScore,1), probability: round(s.probability,3), opportunityScore: round(s.opportunityScore,6), expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0,5), expectedGrossMovePct: round(s.entryEconomics?.expectedGrossMove || 0,5), movementOpportunity: round(s.movementOpportunity,5), catalystScore: round(s.catalyst?.score || 0,2), catalystHeadlines: (s.catalyst?.headlines || []).slice(0,2), higherTimeframeConfirmed: Boolean(s.higherTimeframeConfirmed), spread: round(s.spreadPct,5), rvol: round(s.rvol,2), dollarVolume: round(s.dollarVolume,0), bucket: directionBucket(s.symbol) })), actions };
+  const journal = { event: "decision_journal", ts: new Date(+scheduledTime).toISOString(), strategy: STRATEGY, feed: snap.feed, regime, learning: learn, perf: { trades: perf.trades, winRate: round(perf.winRate, 3), profitFactor: round(perf.profitFactor, 2), expectancy: round(perf.expectancy, 4) }, daily: { pnl: round(daily.realizedPnl, 2), losses: daily.losses, maxConsecLoss: daily.maxConsecLoss }, risk: { intradayDrawdown: round(intradayDraw, 4), highWaterDrawdown: round(highWaterDraw, 4), drawdownMultiplier: dd, dailyLossGuard: dailyLoss, lossCountGuard: lossCount, consecutiveLossGuard: consec, exposure: round(currentExposure, 2), maxExposure: maxTotal }, universeCount: symbols.length, validSignals: signals.length, eligibleOpportunities: marketLeaders.length, leaders: marketLeaders.slice(0, 10).map((s,i) => ({ rank:i+1, symbol: s.symbol, convictionScore: round(s.convictionScore,1), probability: round(s.probability,3), opportunityScore: round(s.opportunityScore,6), expectedNetEdgePct: round(s.entryEconomics?.expectedNetEdge || 0,5), expectedGrossMovePct: round(s.entryEconomics?.expectedGrossMove || 0,5), movementOpportunity: round(s.movementOpportunity,5), catalystScore: round(s.catalyst?.score || 0,2), catalystHeadlines: (s.catalyst?.headlines || []).slice(0,2), higherTimeframeConfirmed: Boolean(s.higherTimeframeConfirmed), spread: round(s.spreadPct,5), rvol: round(s.rvol,2), dollarVolume: round(s.dollarVolume,0), bucket: directionBucket(s.symbol) })), actions };
   console.log(JSON.stringify(journal));
   await persistJournal(env, journal);
-  return { status: actions.length ? "acted" : "hold", endpoint: "paper", strategy: STRATEGY, feed: snap.feed, regime, learning: learn, daily: journal.daily, risk: journal.risk, actions, leaders: journal.leaders };
+  return { status: actions.length ? "acted" : "hold", endpoint: "paper", strategy: STRATEGY, feed: snap.feed, regime, learning: learn, daily: journal.daily, risk: journal.risk, universeCount: symbols.length, eligibleOpportunities: marketLeaders.length, actions, leaders: journal.leaders };
 }
 
 const esc = v => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -270,7 +266,7 @@ const app={
     if(request.method!=="GET")return Response.json({error:"not_found"},{status:404});
     if(url.pathname==="/api/status"){
       const state=await stateHealth(env);
-      return Response.json({service:"alpaca-paper-guard",strategy:STRATEGY,status:String(env.TRADING_ENABLED)==="true"?"armed":"disabled",endpoint:"paper",features:{dynamicScanner:bool(env.DYNAMIC_SCANNER_ENABLED,true),selectiveConviction:true,tradeVolumeObjective:false,probabilityWeightedRanking:true,movementOpportunityRanking:true,catalystAware:true,fixedProfitThreshold:false,positiveNetEdgeRequired:true,opportunityCostExit:true,profitabilityFirst:true,conflictAwareExposure:true,marketDataFeed:preferredFeed(env),realtimeWebSocketRelay:bool(env.REALTIME_STREAM_ENABLED,false),realtimeStreamConnected:Boolean(state?.connected),persistentState:bool(env.PERSISTENT_STATE_ENABLED,false),multiTimeframe:["1Min","5Min","15Min","1Hour"],liveQuoteGuard:true,spreadGuard:true,staleQuoteGuard:true,liquidityGuard:true,haltLuldGuard:true,assetEligibilityGuard:true,marketableLimitOrders:true,dynamicRiskSizing:true,regimeFilter:true,chopFilter:true,newsRiskFilter:bool(env.NEWS_RISK_FILTER_ENABLED,true),adaptiveLearning:true,drawdownGovernor:true,botPositionIsolation:true},safeguards:{minEntryScore:num(env.MIN_ENTRY_SCORE,94),maxConcurrentPositions:int(env.MAX_CONCURRENT_POSITIONS,2),maxUniverseSymbols:int(env.MAX_UNIVERSE_SYMBOLS,150),maxDailyLossPct:pct(env.MAX_DAILY_LOSS_PCT,0.0125),maxDailyLosingExits:int(env.MAX_DAILY_LOSING_EXITS,4),maxConsecutiveLosses:int(env.MAX_CONSECUTIVE_LOSSES,3),symbolCooldownMinutes:int(env.SYMBOL_COOLDOWN_MINUTES,10),maxSpreadPct:pct(env.MAX_SPREAD_PCT,0.003),maxQuoteAgeSeconds:int(env.MAX_QUOTE_AGE_SECONDS,20),minDollarVolume:num(env.MIN_DOLLAR_VOLUME_USD,10000000),minQuoteSize:num(env.MIN_QUOTE_SIZE,1),minPriceUsd:num(env.MIN_PRICE_USD,1),maxTotalExposureUsd:num(env.MAX_TOTAL_EXPOSURE_USD,70000),orderNotionalUsd:num(env.ORDER_NOTIONAL_USD,35000),maxNewEntriesPerCycle:int(env.MAX_NEW_ENTRIES_PER_CYCLE,1),strategyEpochUtc:String(env.STRATEGY_EPOCH_UTC||"")}} ,{headers:{"Cache-Control":"no-store"}});
+      return Response.json({service:"alpaca-paper-guard",strategy:STRATEGY,status:String(env.TRADING_ENABLED)==="true"?"armed":"disabled",endpoint:"paper",features:{dynamicScanner:bool(env.DYNAMIC_SCANNER_ENABLED,true),selectiveConviction:true,relativeOpportunityRanking:true,absoluteScoreGate:false,tradeVolumeObjective:false,probabilityWeightedRanking:true,movementOpportunityRanking:true,catalystAware:true,fixedProfitThreshold:false,positiveNetEdgeRequired:true,opportunityCostExit:true,profitabilityFirst:true,conflictAwareExposure:true,marketDataFeed:preferredFeed(env),realtimeWebSocketRelay:bool(env.REALTIME_STREAM_ENABLED,false),realtimeStreamConnected:Boolean(state?.connected),persistentState:bool(env.PERSISTENT_STATE_ENABLED,false),multiTimeframe:["1Min","5Min","15Min","1Hour"],liveQuoteGuard:true,spreadGuard:true,staleQuoteGuard:true,liquidityGuard:true,haltLuldGuard:true,assetEligibilityGuard:true,marketableLimitOrders:true,dynamicRiskSizing:true,regimeFilter:true,chopFilter:"soft",newsRiskFilter:bool(env.NEWS_RISK_FILTER_ENABLED,true),adaptiveLearning:true,drawdownGovernor:true,botPositionIsolation:true},safeguards:{maxConcurrentPositions:int(env.MAX_CONCURRENT_POSITIONS,2),maxUniverseSymbols:int(env.MAX_UNIVERSE_SYMBOLS,200),maxDailyLossPct:pct(env.MAX_DAILY_LOSS_PCT,0.0125),maxDailyLosingExits:int(env.MAX_DAILY_LOSING_EXITS,4),maxConsecutiveLosses:int(env.MAX_CONSECUTIVE_LOSSES,3),symbolCooldownMinutes:int(env.SYMBOL_COOLDOWN_MINUTES,10),maxSpreadPct:pct(env.MAX_SPREAD_PCT,0.003),maxQuoteAgeSeconds:int(env.MAX_QUOTE_AGE_SECONDS,20),minDollarVolume:num(env.MIN_DOLLAR_VOLUME_USD,5000000),minQuoteSize:num(env.MIN_QUOTE_SIZE,1),minPriceUsd:num(env.MIN_PRICE_USD,1),maxTotalExposureUsd:num(env.MAX_TOTAL_EXPOSURE_USD,70000),orderNotionalUsd:num(env.ORDER_NOTIONAL_USD,35000),maxNewEntriesPerCycle:int(env.MAX_NEW_ENTRIES_PER_CYCLE,1),strategyEpochUtc:String(env.STRATEGY_EPOCH_UTC||"")}} ,{headers:{"Cache-Control":"no-store"}});
     }
     if(url.pathname==="/api/state")return Response.json(await stateHealth(env)||{connected:false},{headers:{"Cache-Control":"no-store"}});
     if(url.pathname!=="/")return Response.json({error:"not_found"},{status:404});
