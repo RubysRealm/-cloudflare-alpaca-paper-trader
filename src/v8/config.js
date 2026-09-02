@@ -1,4 +1,4 @@
-export const STRATEGY='selective-conviction-v9';
+export const STRATEGY='selective-opportunity-v10';
 export const BOT_PREFIXES=['paper-','paper8-'];
 export const TECH=new Set(['QQQ','TQQQ','SQQQ','XLK','SMH','SOXX','SOXL','SOXS','NVDA','AAPL','TSLA','AMD','AMZN','META','MSFT','GOOGL','GOOG','AVGO','NFLX','CRM','ORCL','INTC','MU','QCOM','ARM','PLTR']);
 export const INVERSE=new Set(['SH','PSQ','RWM','SQQQ','SPXU','SOXS','TZA']);
