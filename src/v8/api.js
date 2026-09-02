@@ -11,6 +11,7 @@ const REGIME = ["SPY","QQQ","IWM"];
 const CORE = ["DIA","SH","PSQ","RWM","XLK","XLF","XLE","SMH","TLT","GLD"];
 const NORMAL_SYMBOL = /^[A-Z]{1,5}$/;
 const barBatches = new Map();
+let stockAssetCache = { at: 0, symbols: [] };
 
 export async function alpaca(env, path, init = {}) {
   const r = await fetch(`${PAPER_API}${path}`, { ...init, headers: { ...headers(env), ...(init.headers || {}) } });
@@ -46,15 +47,29 @@ function approvedUniverse(env) {
   return new Set(raw.split(",").map(s => s.trim().toUpperCase()).filter(Boolean));
 }
 
+async function activeTradableStocks(env) {
+  if (stockAssetCache.symbols.length && Date.now() - stockAssetCache.at < 30 * 60000) return stockAssetCache.symbols;
+  try {
+    const assets = await alpaca(env, "/v2/assets?status=active&asset_class=us_equity");
+    const symbols = (Array.isArray(assets) ? assets : []).filter(a =>
+      a && a.symbol && a.status !== "inactive" && a.tradable !== false && a.fractionable !== false && NORMAL_SYMBOL.test(String(a.symbol).toUpperCase())
+    ).map(a => String(a.symbol).toUpperCase()).sort();
+    if (symbols.length) stockAssetCache = { at: Date.now(), symbols };
+  } catch (e) {
+    console.log(JSON.stringify({ event: "scanner_degraded", source: "active_assets", message: e.message }));
+  }
+  return stockAssetCache.symbols;
+}
+
 export async function dynamicUniverse(env) {
-  const max = int(env.MAX_UNIVERSE_SYMBOLS, 40), base = staticUniverse(env), approved = approvedUniverse(env);
+  const max = int(env.MAX_UNIVERSE_SYMBOLS, 200), base = staticUniverse(env), approved = approvedUniverse(env);
   const broad = bool(env.BROAD_SCANNER_ENABLED, true);
   const allowed = symbol => NORMAL_SYMBOL.test(symbol) && (broad || approved.has(symbol));
   if (!bool(env.DYNAMIC_SCANNER_ENABLED, true)) return [...new Set([...REGIME, ...CORE, ...base])].filter(allowed).slice(0, max);
 
   const movers = [], actives = [];
   try {
-    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/movers?top=${int(env.SCANNER_MOVERS_TOP, 50)}`);
+    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/movers?top=${int(env.SCANNER_MOVERS_TOP, 150)}`);
     for (const z of [...(x?.gainers || []), ...(x?.losers || [])]) {
       const symbol = String(z.symbol || "").toUpperCase();
       if (allowed(symbol)) movers.push(symbol);
@@ -62,14 +77,25 @@ export async function dynamicUniverse(env) {
   } catch (e) { console.log(JSON.stringify({ event: "scanner_degraded", source: "movers", message: e.message })); }
 
   try {
-    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/most-actives?top=${int(env.SCANNER_MOST_ACTIVE_TOP, 100)}&by=volume`);
+    const x = await marketDataRaw(env, `/v1beta1/screener/stocks/most-actives?top=${int(env.SCANNER_MOST_ACTIVE_TOP, 250)}&by=volume`);
     for (const z of x?.most_actives || x?.mostActives || []) {
       const symbol = String(z.symbol || "").toUpperCase();
       if (allowed(symbol)) actives.push(symbol);
     }
   } catch (e) { console.log(JSON.stringify({ event: "scanner_degraded", source: "most_actives", message: e.message })); }
 
-  return [...new Set([...REGIME, ...movers, ...actives, ...CORE, ...base])].filter(allowed).slice(0, max);
+  const priority = [...new Set([...REGIME, ...movers, ...actives, ...CORE, ...base])].filter(allowed);
+  if (priority.length >= max) return priority.slice(0, max);
+
+  const active = (await activeTradableStocks(env)).filter(allowed);
+  if (!active.length) return priority.slice(0, max);
+  const chosen = [...priority], seen = new Set(chosen), needed = max - chosen.length;
+  const minute = Math.floor(Date.now() / 60000), start = (minute * Math.max(1, needed)) % active.length;
+  for (let i = 0; i < active.length && chosen.length < max; i++) {
+    const symbol = active[(start + i) % active.length];
+    if (!seen.has(symbol)) { chosen.push(symbol); seen.add(symbol); }
+  }
+  return chosen.slice(0, max);
 }
 
 function historyHours(timeframe) {
