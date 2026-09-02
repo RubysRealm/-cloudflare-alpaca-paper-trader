@@ -99,7 +99,10 @@ export async function dynamicUniverse(env) {
 }
 
 function historyHours(timeframe) {
-  const m = String(timeframe).match(/^(\d+)Min$/i);
+  const tf = String(timeframe);
+  if (/^(1Day|1D)$/i.test(tf)) return 24 * 120;
+  if (/^(1Week|1W)$/i.test(tf)) return 24 * 365 * 2;
+  const m = tf.match(/^(\d+)Min$/i);
   if (!m) return 168;
   const mins = Number(m[1]);
   if (mins <= 1) return 4;
@@ -159,6 +162,75 @@ export async function fetchLatestQuote(env, symbol) {
   const r = await marketData(env, f => `/v2/stocks/${encodeURIComponent(symbol)}/quotes/latest?feed=${f}`);
   const q = r.data?.quote || r.data?.latestQuote || r.data || {};
   return { quote: q, feed: r.feed };
+}
+
+export async function fetchRecentStockTrades(env, symbol, minutes = 5, limit = 600) {
+  const start = new Date(Date.now() - Math.max(1, minutes) * 60000).toISOString();
+  try {
+    const r = await marketData(env, f => `/v2/stocks/${encodeURIComponent(symbol)}/trades?start=${encodeURIComponent(start)}&limit=${Math.max(20, Math.min(10000, limit))}&feed=${f}&sort=asc`);
+    const rows = r.data?.trades || r.data?.trade || [];
+    return { trades: Array.isArray(rows) ? rows : [], feed: r.feed, available: true };
+  } catch (error) {
+    console.log(JSON.stringify({ event: "stock_tape_degraded", symbol, message: error.message }));
+    return { trades: [], feed: preferredFeed(env), available: false };
+  }
+}
+
+function dateOnly(ms) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+export async function fetchCorporateActionContext(env, symbols, now = Date.now()) {
+  const requested = [...new Set((symbols || []).map(s => String(s || "").toUpperCase()).filter(Boolean))];
+  const out = new Map(requested.map(s => [s, { available: false, count: 0, severe: false, types: [] }]));
+  if (!requested.length) return out;
+  try {
+    const start = dateOnly(Number(now) - 2 * 86400000), end = dateOnly(Number(now) + 7 * 86400000);
+    const d = await marketDataRaw(env, `/v1/corporate-actions?symbols=${requested.join(",")}&start=${start}&end=${end}&data_quality=all&limit=1000`);
+    const root = d?.corporate_actions || d?.corporateActions || d || {};
+    const rows = [];
+    if (Array.isArray(root)) rows.push(...root);
+    else for (const value of Object.values(root)) if (Array.isArray(value)) rows.push(...value);
+    for (const symbol of requested) out.set(symbol, { available: true, count: 0, severe: false, types: [] });
+    const severeTypes = /reverse_split|cash_merger|stock_merger|stock_and_cash_merger|redemption|worthless_removal/i;
+    for (const row of rows) {
+      const symbol = String(row?.symbol || row?.new_symbol || row?.old_symbol || "").toUpperCase();
+      const x = out.get(symbol);
+      if (!x) continue;
+      const type = String(row?.type || row?.ca_type || row?.corporate_action_type || "unknown");
+      x.count++;
+      if (!x.types.includes(type)) x.types.push(type);
+      if (severeTypes.test(type)) x.severe = true;
+    }
+  } catch (error) {
+    console.log(JSON.stringify({ event: "corporate_actions_degraded", message: error.message }));
+  }
+  return out;
+}
+
+export async function fetchOptionVolatilityContext(env, symbol, spot, now = Date.now()) {
+  const fallback = { available: false, contracts: 0, avgIv: 0, callIv: 0, putIv: 0 };
+  if (!(spot > 0)) return fallback;
+  try {
+    const start = dateOnly(now), end = dateOnly(Number(now) + 28 * 86400000);
+    const lo = Math.max(0.01, spot * 0.88), hi = spot * 1.12;
+    const d = await marketDataRaw(env, `/v1beta1/options/snapshots/${encodeURIComponent(symbol)}?feed=indicative&strike_price_gte=${lo.toFixed(4)}&strike_price_lte=${hi.toFixed(4)}&expiration_date_gte=${start}&expiration_date_lte=${end}&limit=200`);
+    const root = d?.snapshots || d?.option_snapshots || d || {};
+    const rows = Array.isArray(root) ? root.map((x, i) => [String(i), x]) : Object.entries(root);
+    let total = 0, n = 0, callTotal = 0, calls = 0, putTotal = 0, puts = 0;
+    for (const [contract, row] of rows) {
+      const iv = +(row?.impliedVolatility ?? row?.implied_volatility ?? row?.iv ?? 0);
+      if (!(iv > 0 && iv < 10)) continue;
+      total += iv; n++;
+      const type = /P\d{8}$/.test(contract) ? "put" : /C\d{8}$/.test(contract) ? "call" : "";
+      if (type === "call") { callTotal += iv; calls++; }
+      if (type === "put") { putTotal += iv; puts++; }
+    }
+    return { available: n > 0, contracts: n, avgIv: n ? total / n : 0, callIv: calls ? callTotal / calls : 0, putIv: puts ? putTotal / puts : 0 };
+  } catch (error) {
+    console.log(JSON.stringify({ event: "options_context_degraded", symbol, message: error.message }));
+    return fallback;
+  }
 }
 
 export async function fetchAsset(env, symbol) {
