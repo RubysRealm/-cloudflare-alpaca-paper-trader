@@ -4,7 +4,7 @@ import { alpaca } from "./api.js";
 
 export { TradingState };
 
-const CRYPTO_ENTRY_BUILD = "crypto-conviction-v6";
+const CRYPTO_ENTRY_BUILD = "crypto-opportunity-v7";
 
 function cryptoOrderPerformance(orders) {
   const inv = {}, closed = [];
@@ -58,7 +58,7 @@ async function cryptoLiveState(env) {
     strategy: CRYPTO_STRATEGY,
     cryptoEntryBuild: CRYPTO_ENTRY_BUILD,
     orderPrefix: CRYPTO_ORDER_PREFIX,
-    exitPolicy: "selective_conviction_profit_rotation",
+    exitPolicy: "relative_opportunity_profit_rotation",
     legacyExecutionActive: false,
     cryptoAccountStatus: account?.crypto_status || null,
     cryptoPositionCount: meaningful.length,
