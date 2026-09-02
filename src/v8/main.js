@@ -96,6 +96,14 @@ const app = {
       try { return Response.json(await cryptoLiveState(env), { headers: { "Cache-Control": "no-store" } }); }
       catch (error) { return Response.json({ strategy: CRYPTO_STRATEGY, endpoint: "paper", cryptoEntryBuild: CRYPTO_ENTRY_BUILD, error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } }); }
     }
+    if (request.method === "GET" && url.pathname === "/api/portfolio/history") {
+      try {
+        const history = await alpaca(env, "/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=continuous&pnl_reset=no_reset");
+        return Response.json(history, { headers: { "Cache-Control": "no-store" } });
+      } catch (error) {
+        return Response.json({ endpoint: "paper", error: error.message }, { status: 502, headers: { "Cache-Control": "no-store" } });
+      }
+    }
     return stockApp.fetch(request, env, ctx);
   },
   async scheduled(controller, env, ctx) {
