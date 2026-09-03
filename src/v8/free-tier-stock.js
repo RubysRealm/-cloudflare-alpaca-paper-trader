@@ -7,6 +7,7 @@ import { num, pct, int, clamp, round, etParts } from './config.js';
 export const STOCK_STRATEGY = 'free-tier-deep-stock-v12';
 const PREFIXES = ['paper8-','paper-'];
 const isBot = o => PREFIXES.some(p => String(o?.client_order_id||'').startsWith(p));
+const commonStockLike=s=>/^[A-Z]{1,5}$/.test(s)&&!(s.length===5&&/[WUR]$/.test(s));
 
 function snapFields(s={}) {
   const q=s.latestQuote||s.latest_quote||{}, m=s.minuteBar||s.minute_bar||{}, d=s.dailyBar||s.daily_bar||{}, p=s.prevDailyBar||s.prev_daily_bar||{};
@@ -20,7 +21,7 @@ async function discoverySymbols(env){
   const out=[];
   try{const x=await marketDataRaw(env,`/v1beta1/screener/stocks/movers?top=${int(env.FREE_TIER_STOCK_MOVER_COUNT,30)}`);for(const z of [...(x?.gainers||[]),...(x?.losers||[])]) if(z?.symbol) out.push(String(z.symbol).toUpperCase());}catch{}
   try{const x=await marketDataRaw(env,`/v1beta1/screener/stocks/most-actives?top=${int(env.FREE_TIER_STOCK_ACTIVE_COUNT,30)}&by=volume`);for(const z of x?.most_actives||x?.mostActives||[]) if(z?.symbol) out.push(String(z.symbol).toUpperCase());}catch{}
-  return [...new Set(out)].filter(s=>/^[A-Z]{1,5}$/.test(s)).slice(0,int(env.FREE_TIER_STOCK_DISCOVERY_MAX,60));
+  return [...new Set(out)].filter(commonStockLike).slice(0,int(env.FREE_TIER_STOCK_DISCOVERY_MAX,60));
 }
 
 async function tradeTape(env,symbol){
@@ -89,7 +90,7 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   const snap=(await fetchSnapshots(env,symbols)).snapshots||{};
   const light=symbols.map(symbol=>({symbol,...snapFields(snap[symbol]||{})})).filter(x=>x.mid>1&&x.ask>0&&x.bid>0&&x.spread<=pct(env.MAX_SPREAD_PCT,0.003)&&x.dollarVolume>=num(env.MIN_DOLLAR_VOLUME_USD,5000000)&&x.minRet>-0.002&&x.dayRet>-0.03)
     .sort((a,b)=>(b.minRet*2+b.dayRet*0.35+Math.log10(Math.max(1,b.dollarVolume))*0.0002)-(a.minRet*2+a.dayRet*0.35+Math.log10(Math.max(1,a.dollarVolume))*0.0002));
-  const finalists=light.slice(0,int(env.FREE_TIER_STOCK_FINALISTS,2));
+  const finalists=light.slice(0,int(env.FREE_TIER_STOCK_FINALISTS,1));
   const news=await recentNewsContext(env,finalists.map(x=>x.symbol),now,180);
   const deep=(await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))))).filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
   const botLots=botLotsFromOrders(orders),botPos=(positions||[]).filter(p=>botLots[p.symbol]?.qty>1e-8),maxPos=int(env.MAX_CONCURRENT_POSITIONS,2);
@@ -101,4 +102,4 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
 }
 
-export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'broad_screener_then_deep_finalists',finalists:int(env.FREE_TIER_STOCK_FINALISTS,2),alternatingMarketDiscovery:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,tradeVolumeObjective:false}};}
+export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'broad_screener_then_deep_finalists',finalists:int(env.FREE_TIER_STOCK_FINALISTS,1),alternatingMarketDiscovery:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,tradeVolumeObjective:false}};}
