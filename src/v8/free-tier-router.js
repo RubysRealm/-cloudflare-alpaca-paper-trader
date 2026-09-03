@@ -2,6 +2,7 @@ import { alpaca, marketDataRaw } from './api.js';
 import { pct, int, clamp } from './config.js';
 
 let cryptoCache={at:0,symbols:[]};
+const commonStockLike=s=>/^[A-Z]{1,5}$/.test(s)&&!(s.length===5&&/[WUR]$/.test(s));
 
 async function cryptoSymbols(env){
   if(cryptoCache.symbols.length&&Date.now()-cryptoCache.at<60000)return cryptoCache.symbols;
@@ -27,7 +28,7 @@ export async function routeResearchMarket(env,now){
     for(const z of d?.gainers||[]){
       const symbol=String(z?.symbol||'').toUpperCase();
       const move=Math.max(0,(+(z?.percent_change??z?.percentChange??0))/100);
-      if(!symbol||!(move>0))continue;
+      if(!commonStockLike(symbol)||!(move>0))continue;
       const score=move-pct(env.MAX_ENTRY_SLIPPAGE_PCT,0.001)-pct(env.MAX_EXIT_SLIPPAGE_PCT,0.0012);
       if(score>stockBest.score)stockBest={symbol,score,move};
     }
@@ -54,9 +55,7 @@ export async function routeResearchMarket(env,now){
     const cryptoAdjusted=Math.max(0,cryptoBest.score);
     if(stockAdjusted>cryptoAdjusted*1.05){market='stock';reason='stock_best_net_opportunity';}
     else if(cryptoAdjusted>stockAdjusted*1.05){market='crypto';reason='crypto_best_net_opportunity';}
-    else {
-      const minute=new Date(now).getUTCMinutes();market=minute%2===0?'stock':'crypto';reason='opportunity_tie_rotate';
-    }
+    else {const minute=new Date(now).getUTCMinutes();market=minute%2===0?'stock':'crypto';reason='opportunity_tie_rotate';}
   }
   return{market,reason,stockOpen,stockBest:{...stockBest,score:clamp(stockBest.score,-1,1)},cryptoBest:{...cryptoBest,score:clamp(cryptoBest.score,-1,1)}};
 }
