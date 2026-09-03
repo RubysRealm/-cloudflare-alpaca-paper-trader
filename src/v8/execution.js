@@ -14,23 +14,18 @@ export function exitDecision(position, signal, env, now, etParts) {
   const { hour, minute } = etParts(now);
 
   if (hour === 9 && minute === 30) return { exit: true, reason: "session_open_reset", pnlPct: pnl };
-
   if (pnl <= -p.stop) return { exit: true, reason: "dynamic_stop", pnlPct: pnl };
-
   if (signal && pnl <= -0.0015) {
     const thesisBroken = side === "long"
       ? (!signal.longConfirmed || signal.score < scoreFloor * 0.85 || (signal.s1?.ret1 < 0 && signal.s5?.ret1 < 0))
       : (!signal.shortConfirmed || signal.shortScore < scoreFloor * 0.85 || (signal.s1?.ret1 > 0 && signal.s5?.ret1 > 0));
     if (thesisBroken) return { exit: true, reason: "thesis_failed", pnlPct: pnl };
   }
-
   if (pnl >= p.target) return { exit: true, reason: "dynamic_target", pnlPct: pnl };
-
   if (pnl >= p.trailTrigger && signal) {
     const fail = side === "long" ? price < signal.s5.ema9 * (1 - p.trailGiveback) : price > signal.s5.ema9 * (1 + p.trailGiveback);
     if (fail) return { exit: true, reason: "adaptive_trail", pnlPct: pnl };
   }
-
   const protectAt = Math.max(0.0045, p.stop * 0.8);
   if (pnl >= protectAt && signal) {
     const fail = side === "long"
@@ -38,14 +33,12 @@ export function exitDecision(position, signal, env, now, etParts) {
       : ((!signal.shortConfirmed || signal.shortScore < scoreFloor) && price > signal.s5.ema9);
     if (fail) return { exit: true, reason: "profit_protect", pnlPct: pnl };
   }
-
   if (signal && pnl <= -Math.max(0.002, p.stop * 0.45)) {
     const fail = side === "long"
       ? ((!signal.s5.trend && !signal.s15.trend) || (price < signal.s5.vwap && price < signal.s15.vwap))
       : ((!signal.s5.downTrend && !signal.s15.downTrend) || (price > signal.s5.vwap && price > signal.s15.vwap));
     if (fail) return { exit: true, reason: "trend_failure", pnlPct: pnl };
   }
-
   if (hour > 15 || (hour === 15 && minute >= 50)) return { exit: true, reason: "end_of_day_flatten", pnlPct: pnl };
   return { exit: false, reason: "hold", pnlPct: pnl };
 }
@@ -62,6 +55,18 @@ async function freshQuote(env, symbol) {
   return { bid, ask, bidSize, askSize, mid, spreadPct, quoteAgeSec };
 }
 
+function entryTimingOk(c) {
+  const price = +(c?.price || 0), s1 = c?.s1 || {}, s5 = c?.s5 || {};
+  const ref = Math.max(+(s5.ema9 || 0), +(s5.vwap || 0));
+  if (!(price > 0 && ref > 0)) return false;
+  const stretch = price / ref - 1;
+  const rsi = +(s5.rsi14 ?? 50);
+  const pullback = Boolean(s5.pullback && stretch <= 0.0045 && rsi <= 74);
+  const controlledBreakout = Boolean(s5.breakout && stretch <= 0.006 && rsi <= 76 && (s1.ret1 || 0) <= 0.008 && (s1.ret3 || 0) <= 0.018);
+  const resetContinuation = Boolean(stretch <= 0.0035 && rsi <= 72 && (s1.ret1 || 0) <= 0.005 && (s5.ret1 || 0) >= 0);
+  return pullback || controlledBreakout || resetContinuation;
+}
+
 export async function cancelStaleBotOrders(env, orders, now) {
   const age = int(env.ORDER_TIMEOUT_SECONDS, 75) * 1000, actions = [];
   for (const o of orders.filter(isBotOrder)) {
@@ -75,6 +80,7 @@ export async function cancelStaleBotOrders(env, orders, now) {
 }
 
 export async function placeLimitBuy(env, c, notional, now) {
+  if (!entryTimingOk(c)) throw new Error("entry_timing_overextended_wait_for_pullback");
   const q = await freshQuote(env, c.symbol);
   const maxSpread = pct(env.MAX_SPREAD_PCT, 0.003), maxAge = int(env.MAX_QUOTE_AGE_SECONDS, 20), minQuoteSize = num(env.MIN_QUOTE_SIZE, 1);
   if (!(q.bid > 0 && q.ask > 0)) throw new Error("fresh_quote_unavailable");
