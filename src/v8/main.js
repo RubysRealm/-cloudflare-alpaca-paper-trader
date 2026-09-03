@@ -33,8 +33,14 @@ const app={
  async fetch(request,env){
   const url=new URL(request.url);
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
-  if(url.pathname==='/api/status')return Response.json({...stockFreeTierStatus(env),status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
-  if(url.pathname==='/api/crypto/status')return Response.json({...cryptoFreeTierStatus(env),enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+  if(url.pathname==='/api/status'){
+    const s=stockFreeTierStatus(env);
+    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:true},status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+  }
+  if(url.pathname==='/api/crypto/status'){
+    const s=cryptoFreeTierStatus(env);
+    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:true},enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+  }
   if(url.pathname==='/api/router/opportunity')return Response.json({...await routeResearchMarket(env,Date.now()),build:BUILD},{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
