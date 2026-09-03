@@ -1,18 +1,12 @@
 import { TradingState } from './state.js';
 import { alpaca } from './api.js';
-import { etParts } from './config.js';
 import { runStockFreeTier, stockFreeTierStatus, STOCK_STRATEGY } from './free-tier-stock.js';
 import { runCryptoFreeTier, cryptoFreeTierStatus, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './free-tier-crypto.js';
+import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
 
-const BUILD='free-tier-research-v1';
-
-function regularStockWindow(time){
-  const p=etParts(time),m=p.hour*60+p.minute;
-  const d=new Date(time).toLocaleDateString('en-US',{timeZone:'America/New_York',weekday:'short'});
-  return !['Sat','Sun'].includes(d)&&m>=565&&m<960;
-}
+const BUILD='free-tier-research-v2';
 
 function cryptoPerformance(orders){
   const inv={},closed=[];
@@ -39,19 +33,23 @@ const app={
  async fetch(request,env){
   const url=new URL(request.url);
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
-  if(url.pathname==='/api/status')return Response.json({...stockFreeTierStatus(env),status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD},{headers:{'Cache-Control':'no-store'}});
-  if(url.pathname==='/api/crypto/status')return Response.json({...cryptoFreeTierStatus(env),enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD},{headers:{'Cache-Control':'no-store'}});
+  if(url.pathname==='/api/status')return Response.json({...stockFreeTierStatus(env),status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+  if(url.pathname==='/api/crypto/status')return Response.json({...cryptoFreeTierStatus(env),enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+  if(url.pathname==='/api/router/opportunity')return Response.json({...await routeResearchMarket(env,Date.now()),build:BUILD},{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/portfolio/history'){try{return Response.json(await alpaca(env,'/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=continuous&pnl_reset=no_reset'),{headers:{'Cache-Control':'no-store'}});}catch(e){return Response.json({error:e.message},{status:502});}}
-  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper'});
+  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',adaptiveMarketRouting:true});
  },
  async scheduled(controller,env,ctx){
-  const now=controller.scheduledTime,stockWindow=regularStockWindow(now),minute=etParts(now).minute;
-  const task=stockWindow
-    ? (minute%2===0?runStockFreeTier(env,now,{discover:true}):runCryptoFreeTier(env,now,{discover:true}))
-    : runCryptoFreeTier(env,now,{discover:true});
-  ctx.waitUntil(task.then(r=>console.log(JSON.stringify({event:'free_tier_cycle',build:BUILD,...r}))).catch(e=>console.error(JSON.stringify({event:'free_tier_cycle_failed',build:BUILD,message:e.message}))));
+  const now=controller.scheduledTime;
+  ctx.waitUntil((async()=>{
+    const route=await routeResearchMarket(env,now);
+    const result=route.market==='stock'
+      ? await runStockFreeTier(env,now,{discover:true})
+      : await runCryptoFreeTier(env,now,{discover:true});
+    console.log(JSON.stringify({event:'free_tier_cycle',build:BUILD,route,...result}));
+  })().catch(e=>console.error(JSON.stringify({event:'free_tier_cycle_failed',build:BUILD,message:e.message}))));
  }
 };
 export default app;
