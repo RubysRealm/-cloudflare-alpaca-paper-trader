@@ -6,7 +6,7 @@ import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
 
-const BUILD='free-tier-research-v3';
+const BUILD='free-tier-research-v4';
 
 function cryptoPerformance(orders){
   const inv={},closed=[];
@@ -35,7 +35,7 @@ const app={
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
   if(url.pathname==='/api/status'){
     const s=stockFreeTierStatus(env);
-    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{...s.research,antiChaseEntryTiming:true},status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/crypto/status'){
     const s=cryptoFreeTierStatus(env);
