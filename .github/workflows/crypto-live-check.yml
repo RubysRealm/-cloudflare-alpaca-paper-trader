@@ -1,4 +1,4 @@
-name: Crypto live execution check
+name: Free-tier live execution check
 on:
   push:
     branches: [main]
@@ -14,14 +14,12 @@ jobs:
         run: |
           set -euo pipefail
           BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
+          STOCK="$(curl --fail --silent --show-error --max-time 60 "$BASE/api/status")"
+          CRYPTO="$(curl --fail --silent --show-error --max-time 60 "$BASE/api/crypto/status")"
           LIVE="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/crypto/live")"
-          STATUS="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/crypto/status")"
-          STATE="$(curl --fail --silent --show-error --max-time 90 "$BASE/api/state")"
-          STOCK="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/status")"
+          STATE="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/state")"
+          echo "STOCK=$STOCK"
+          echo "CRYPTO=$CRYPTO"
           echo "CRYPTO_LIVE=$LIVE"
-          echo "CRYPTO_STATUS=$STATUS"
-          echo "TRADING_STATE=$STATE"
-          echo "STOCK_STATUS=$STOCK"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`strategy=${x.strategy} build=${x.cryptoEntryBuild} policy=${x.exitPolicy} positions=${x.cryptoPositionCount} current_orders=${x.currentStrategyOrderCount} legacy_history=${x.legacyHistoricalOrderCount}`); if(x.strategy!=="crypto-deep-research-v8" || x.cryptoEntryBuild!=="crypto-deep-research-v8" || x.exitPolicy!=="deep_research_profit_rotation" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(7)' "$LIVE"
-          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{}; console.log(`universe=${x.universeCount} deep=${r.deepFinalistResearch} tape=${r.recentTradeTape} venue=${r.secondaryVenueTapeBestEffort} rs=${r.crossSectionRelativeStrength}`); if(x.strategy!=="crypto-deep-research-v8" || x.cryptoEntryBuild!=="crypto-deep-research-v8" || !(x.universeCount>=73) || x.allActiveTradablePairs!==true || r.deepFinalistResearch!==true || r.researchBeforeExecution!==true || r.recentTradeTape!==true || r.secondaryVenueTapeBestEffort!==true || r.crossSectionRelativeStrength!==true || r.relativeOpportunityRanking!==true || r.absoluteScoreGate!==false || r.tradeVolumeObjective!==false || r.probabilityWeightedRanking!==true || r.movementOpportunityRanking!==true || r.catalystAware!==true || r.positiveNetEdgeRequired!==true || x.maxConcurrentPositions!==2 || x.orderNotionalUsd!==25000) process.exit(8)' "$STATUS"
-          node -e 'const x=JSON.parse(process.argv[1]); const f=x.features||{},s=x.safeguards||{}; console.log(`stock=${x.strategy} deep=${f.deepFinalistResearch} tape=${f.tradeTapeResearch} daily=${f.dailyContext} options=${f.optionsVolatilityContext}`); if(x.strategy!=="selective-deep-research-v11" || f.deepFinalistResearch!==true || f.tradeTapeResearch!==true || f.dailyContext!==true || f.optionsVolatilityContext!==true || f.corporateActionContext!==true || f.researchBeforeExecution!==true || f.relativeOpportunityRanking!==true || f.tradeVolumeObjective!==false || f.probabilityWeightedRanking!==true || f.catalystAware!==true || s.maxUniverseSymbols!==200 || s.maxConcurrentPositions!==2 || s.orderNotionalUsd!==35000) process.exit(9)' "$STOCK"
+          echo "STATE=$STATE"
+          node -e 'const s=JSON.parse(process.argv[1]),c=JSON.parse(process.argv[2]),l=JSON.parse(process.argv[3]),a=JSON.parse(process.argv[4]); if(s.strategy!=="free-tier-deep-stock-v12"||s.build!=="free-tier-research-v1"||s.freeTier?.cpuMsPerInvocation!==10||c.strategy!=="free-tier-deep-crypto-v9"||c.cryptoEntryBuild!=="free-tier-research-v1"||c.freeTier?.cpuMsPerInvocation!==10||l.strategy!=="free-tier-deep-crypto-v9"||a.build!=="free-tier-research-v1"||!(a.equity>0))process.exit(9); console.log(`verified stock=${s.strategy} crypto=${c.strategy} equity=${a.equity} crypto_positions=${l.cryptoPositionCount}`)' "$STOCK" "$CRYPTO" "$LIVE" "$STATE"
