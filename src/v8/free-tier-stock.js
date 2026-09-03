@@ -1,10 +1,10 @@
-import { alpaca, marketDataRaw, fetchBars, fetchSnapshots, fetchLatestQuote, fetchAsset, recentNewsContext } from './api.js';
+import { alpaca, marketDataRaw, fetchBars, fetchSnapshots, fetchAsset, recentNewsContext } from './api.js';
 import { timeframeSignal, combineSignals } from './signals.js';
 import { botLotsFromOrders } from './performance.js';
 import { placeLimitBuy, placeLimitSell } from './execution.js';
 import { num, pct, int, clamp, round, etParts } from './config.js';
 
-export const STOCK_STRATEGY = 'free-tier-deep-stock-v12';
+export const STOCK_STRATEGY = 'free-tier-deep-stock-v13';
 const PREFIXES = ['paper8-','paper-'];
 const isBot = o => PREFIXES.some(p => String(o?.client_order_id||'').startsWith(p));
 const commonStockLike=s=>/^[A-Z]{1,5}$/.test(s)&&!(s.length===5&&/[WUR]$/.test(s));
@@ -34,6 +34,13 @@ async function tradeTape(env,symbol){
   }catch{return {ok:false,pressure:0,lastVsVwap:0,count:0};}
 }
 
+function entryTimingOk(base){
+  const s1=base?.s1||{},s5=base?.s5||{},price=+(base?.price||0),ref=Math.max(+(s5.ema9||0),+(s5.vwap||0));
+  if(!(price>0&&ref>0))return false;
+  const stretch=price/ref-1,rsi=+(s5.rsi14??50);
+  return Boolean((s5.pullback&&stretch<=0.006&&rsi<=74)||(s5.breakout&&stretch<=0.008&&rsi<=76&&(s1.ret1||0)<=0.012&&(s1.ret3||0)<=0.025)||(stretch<=0.0045&&rsi<=72&&(s1.ret1||0)<=0.008&&(s5.ret1||0)>=0));
+}
+
 async function deepCandidate(env,symbol,snapshot,news){
   const [m1,m5,m15,h1,d1,tape]=await Promise.all([
     fetchBars(env,symbol,'1Min',35),fetchBars(env,symbol,'5Min',40),fetchBars(env,symbol,'15Min',30),fetchBars(env,symbol,'1Hour',24),fetchBars(env,symbol,'1Day',20),tradeTape(env,symbol)
@@ -45,14 +52,15 @@ async function deepCandidate(env,symbol,snapshot,news){
   const flow=(base.s1?.ret1>0&&base.s5?.ret1>=0)||(base.s5?.ret3>0&&base.s15?.ret1>=0);
   const dailySupport=Boolean(ds?.trend||ds?.trendSlope||(!ds?.downTrend&&ds?.ret1>=0));
   const higherSupport=Boolean(hs?.trend||hs?.trendSlope||(!hs?.downTrend&&hs?.ret1>=0));
+  const timing=entryTimingOk(base);
   const movement=Math.max(base.atrPct||0,Math.max(0,base.s1?.ret3||0)*1.5,Math.max(0,base.s5?.ret3||0)*1.25,Math.max(0,hs?.ret1||0)*0.6);
   const cost=sf.spread+pct(env.MAX_ENTRY_SLIPPAGE_PCT,0.001)+pct(env.MAX_EXIT_SLIPPAGE_PCT,0.0012);
   const gross=Math.max(movement,(base.atrPct||0)*1.6,0.0005), net=gross-cost;
   let probability=0.42+(base.trendVotes||0)*0.035+(higherSupport?0.08:-0.07)+(dailySupport?0.07:-0.08)+(flow?0.06:-0.04)+clamp(tape.pressure*14,-0.08,0.08)+clamp((catalyst.score||0)/100,-0.16,0.12);
   probability=clamp(probability,0.08,0.94);
   const score=Math.max(0,net)*probability*(1+clamp(movement*55,0,3));
-  const pass=!catalyst.severe&&flow&&higherSupport&&dailySupport&&tape.ok&&tape.lastVsVwap>-0.0015&&sf.spread<=pct(env.MAX_SPREAD_PCT,0.003)&&net>0;
-  return {...base,symbol,probability,opportunityScore:score,movementOpportunity:movement,expectedNetEdge:net,expectedGrossMove:gross,catalyst,tape,dailySupport,higherSupport,deepPass:pass};
+  const pass=!catalyst.severe&&flow&&higherSupport&&dailySupport&&timing&&tape.ok&&tape.lastVsVwap>-0.0015&&sf.spread<=pct(env.MAX_SPREAD_PCT,0.003)&&net>0;
+  return {...base,symbol,probability,opportunityScore:score,movementOpportunity:movement,expectedNetEdge:net,expectedGrossMove:gross,catalyst,tape,dailySupport,higherSupport,entryTimingOk:timing,deepPass:pass};
 }
 
 async function managePositions(env,now,positions,orders,snapshots){
@@ -90,16 +98,18 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   const snap=(await fetchSnapshots(env,symbols)).snapshots||{};
   const light=symbols.map(symbol=>({symbol,...snapFields(snap[symbol]||{})})).filter(x=>x.mid>1&&x.ask>0&&x.bid>0&&x.spread<=pct(env.MAX_SPREAD_PCT,0.003)&&x.dollarVolume>=num(env.MIN_DOLLAR_VOLUME_USD,5000000)&&x.minRet>-0.002&&x.dayRet>-0.03)
     .sort((a,b)=>(b.minRet*2+b.dayRet*0.35+Math.log10(Math.max(1,b.dollarVolume))*0.0002)-(a.minRet*2+a.dayRet*0.35+Math.log10(Math.max(1,a.dollarVolume))*0.0002));
-  const finalists=light.slice(0,int(env.FREE_TIER_STOCK_FINALISTS,1));
+  const pool=light.slice(0,Math.max(1,int(env.FREE_TIER_STOCK_ROTATION_POOL,5)));
+  const slot=pool.length?Math.floor(Number(now)/60000)%pool.length:0;
+  const finalists=pool.length?[pool[slot]]:[];
   const news=await recentNewsContext(env,finalists.map(x=>x.symbol),now,180);
   const deep=(await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))))).filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
   const botLots=botLotsFromOrders(orders),botPos=(positions||[]).filter(p=>botLots[p.symbol]?.qty>1e-8),maxPos=int(env.MAX_CONCURRENT_POSITIONS,2);
-  if(botPos.length>=maxPos||!deep.length) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
+  if(botPos.length>=maxPos||!deep.length) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,rotationPool:pool.map(x=>x.symbol),rotationSlot:slot,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
   const c=deep[0]; let asset=await fetchAsset(env,c.symbol); if(!asset||asset.tradable===false||asset.fractionable===false) return {status:'hold',strategy:STOCK_STRATEGY,mode:'asset_block'};
-  const equity=Math.max(1,+account.equity||1),bp=Math.max(0,+account.buying_power||0),base=Math.min(num(env.ORDER_NOTIONAL_USD,35000),num(env.MAX_POSITION_USD,35000),bp);
+  const bp=Math.max(0,+account.buying_power||0),base=Math.min(num(env.ORDER_NOTIONAL_USD,35000),num(env.MAX_POSITION_USD,35000),bp);
   const notional=Math.min(base,base*clamp(0.65+c.probability*0.55+Math.min(0.25,c.movementOpportunity*12),0.65,1));
   if(notional>=1){try{const o=await placeLimitBuy(env,c,notional,now);actions.push({action:'buy',symbol:c.symbol,reason:'free_tier_deep_research_winner',probability:round(c.probability,3),expectedNetEdge:round(c.expectedNetEdge,5),notional:round(notional,2),orderStatus:o?.status||null});}catch(e){actions.push({action:'buy_failed',symbol:c.symbol,reason:e.message});}}
-  return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
+  return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,rotationPool:pool.map(x=>x.symbol),rotationSlot:slot,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
 }
 
-export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'broad_screener_then_deep_finalists',finalists:int(env.FREE_TIER_STOCK_FINALISTS,1),alternatingMarketDiscovery:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,tradeVolumeObjective:false}};}
+export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'broad_screener_then_cpu_sliced_deep_finalist',finalists:1,rotationPool:int(env.FREE_TIER_STOCK_ROTATION_POOL,5),alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,cpuSlicedCandidateRotation:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,antiChaseEntryTiming:true,tradeVolumeObjective:false}};}
