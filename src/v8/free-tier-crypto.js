@@ -1,8 +1,8 @@
 import { alpaca, marketDataRaw } from './api.js';
 import { num, pct, int, clamp, round } from './config.js';
 
-export const CRYPTO_STRATEGY='free-tier-crypto-v19';
-export const CRYPTO_PREFIX='papercrypto-v19-';
+export const CRYPTO_STRATEGY='free-tier-crypto-v20';
+export const CRYPTO_PREFIX='papercrypto-v20-';
 
 const MEGA_CAPS=new Set(['BTC/USD','ETH/USD','SOL/USD']);
 const norm=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
@@ -106,6 +106,15 @@ function evaluateCandidates(env,all){
   return{qualified,researched,evaluated};
 }
 
+function sizingCaps(env,c,equity,cash,availableExposure){
+  const configuredCap=Math.min(num(env.CRYPTO_ORDER_NOTIONAL_USD,45000),num(env.CRYPTO_MAX_POSITION_USD,45000));
+  const targetFraction=clamp(0.36+c.score*0.008,0.36,0.45),bookParticipation=clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),dailyParticipation=clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05),minQuote=num(env.CRYPTO_MIN_QUOTE_NOTIONAL_USD,1000);
+  const depthCap=c.quoteNotional>0?c.quoteNotional*bookParticipation:0,volumeCap=c.dollarVolume>0?c.dollarVolume*dailyParticipation:0,depthUsable=c.quoteNotional>=minQuote;
+  const liquidityCap=depthUsable?depthCap:volumeCap,liquiditySource=depthUsable?'quote_depth':'venue_volume_fallback';
+  const notional=Math.max(0,Math.min(configuredCap,equity*targetFraction,cash,availableExposure,liquidityCap));
+  return{targetFraction,bookParticipation,dailyParticipation,depthCap,volumeCap,liquidityCap,liquiditySource,notional};
+}
+
 async function manage(env,now,allAssets,positions,snap,ranked){
   const actions=[],byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a])),byRank=new Map(ranked.map(x=>[norm(x.symbol),x])),best=ranked[0]||null;
   const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1);
@@ -137,16 +146,17 @@ export async function cryptoOpportunityDiagnostics(env,now=Date.now()){
   const {qualified,evaluated}=evaluateCandidates(env,light),byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a]));
   const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1),heldSet=new Set(held.map(p=>norm(p.symbol))),cooldowns=cooldownSymbols(env,orders,now),maxPos=int(env.CRYPTO_MAX_CONCURRENT_POSITIONS,2);
   const cash=Math.max(0,+(account.non_marginable_buying_power||account.cash||account.buying_power||0)),equity=Math.max(cash,+(account.equity||account.portfolio_value||0));
-  const configuredCap=Math.min(num(env.CRYPTO_ORDER_NOTIONAL_USD,45000),num(env.CRYPTO_MAX_POSITION_USD,45000)),configuredTotalCap=num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,85000),currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure),bookParticipation=clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),dailyParticipation=clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05),minOrder=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25);
+  const configuredTotalCap=num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,85000),currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure),minOrder=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25);
   const ranked=[...evaluated].sort((a,b)=>b.score-a.score).slice(0,12).map(c=>{
-    const targetFraction=clamp(0.36+c.score*0.008,0.36,0.45),depthCap=c.quoteNotional>0?c.quoteNotional*bookParticipation:0,volumeCap=c.dollarVolume>0?c.dollarVolume*dailyParticipation:0,notional=Math.max(0,Math.min(configuredCap,equity*targetFraction,cash,availableExposure,depthCap,volumeCap)),blocks=[...c.reasons];
+    const s=sizingCaps(env,c,equity,cash,availableExposure),blocks=[...c.reasons];
     if(heldSet.has(norm(c.symbol)))blocks.push('already_held');
     if(cooldowns.has(norm(c.symbol)))blocks.push('reentry_cooldown');
     if(held.length>=maxPos)blocks.push('max_positions');
-    if(notional<minOrder)blocks.push('order_below_min_after_liquidity_caps');
-    return{...diag(c),bid:round(c.bid,8),ask:round(c.ask,8),bidNotional:round(c.bidNotional,2),askNotional:round(c.askNotional,2),targetEquityNotional:round(equity*targetFraction,2),depthCap:round(depthCap,2),volumeCap:round(volumeCap,2),finalOrderNotional:round(notional,2),cooldown:cooldowns.has(norm(c.symbol)),eligible:c.pass&&!heldSet.has(norm(c.symbol))&&!cooldowns.has(norm(c.symbol))&&held.length<maxPos&&notional>=minOrder,blocks:[...new Set(blocks)]};
+    if(s.notional<minOrder)blocks.push('order_below_min_after_liquidity_cap');
+    return{...diag(c),bid:round(c.bid,8),ask:round(c.ask,8),bidNotional:round(c.bidNotional,2),askNotional:round(c.askNotional,2),targetEquityNotional:round(equity*s.targetFraction,2),depthCap:round(s.depthCap,2),volumeCap:round(s.volumeCap,2),liquiditySource:s.liquiditySource,liquidityCap:round(s.liquidityCap,2),finalOrderNotional:round(s.notional,2),cooldown:cooldowns.has(norm(c.symbol)),eligible:c.pass&&!heldSet.has(norm(c.symbol))&&!cooldowns.has(norm(c.symbol))&&held.length<maxPos&&s.notional>=minOrder,blocks:[...new Set(blocks)]};
   });
-  return{strategy:CRYPTO_STRATEGY,readOnly:true,universeCount:symbols.length,qualifiedCount:qualified.length,equity:round(equity,2),cash:round(cash,2),currentExposure:round(currentExposure,2),availableExposure:round(availableExposure,2),maxPositions:maxPos,heldSymbols:[...heldSet],cooldownSymbols:[...cooldowns],bookParticipation,dailyVolumeParticipation:dailyParticipation,candidates:ranked};
+  const sample=sizingCaps(env,{score:0,quoteNotional:0,dollarVolume:0},equity,cash,availableExposure);
+  return{strategy:CRYPTO_STRATEGY,readOnly:true,universeCount:symbols.length,qualifiedCount:qualified.length,equity:round(equity,2),cash:round(cash,2),currentExposure:round(currentExposure,2),availableExposure:round(availableExposure,2),maxPositions:maxPos,heldSymbols:[...heldSet],cooldownSymbols:[...cooldowns],bookParticipation:sample.bookParticipation,dailyVolumeParticipation:sample.dailyParticipation,liquiditySizingPolicy:'quote_depth_first_venue_volume_fallback',candidates:ranked};
 }
 
 export async function runCryptoFreeTier(env,now,{discover=true}={}){
@@ -166,21 +176,16 @@ export async function runCryptoFreeTier(env,now,{discover=true}={}){
   const c=finalists.find(x=>!heldSet.has(norm(x.symbol))&&!cooldowns.has(norm(x.symbol)));
   if(!c)return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(diag),researched:researched.map(diag),cooldownSymbols:[...cooldowns],actions};
 
-  const asset=byNorm.get(norm(c.symbol)),cash=Math.max(0,+(account.non_marginable_buying_power||account.cash||account.buying_power||0)),equity=Math.max(cash,+(account.equity||account.portfolio_value||0));
-  const configuredCap=Math.min(num(env.CRYPTO_ORDER_NOTIONAL_USD,45000),num(env.CRYPTO_MAX_POSITION_USD,45000)),configuredTotalCap=num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,85000);
-  const currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure);
-  const targetFraction=clamp(0.36+c.score*0.008,0.36,0.45),bookParticipation=clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),dailyParticipation=clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05);
-  const depthCap=c.quoteNotional>0?c.quoteNotional*bookParticipation:0,volumeCap=c.dollarVolume>0?c.dollarVolume*dailyParticipation:0;
-  const notional=Math.min(configuredCap,equity*targetFraction,cash,availableExposure,depthCap,volumeCap);
-  if(notional>=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25)){
-    try{const o=await buy(env,c,asset,notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v19_liquidity_sized_velocity_candidate',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),grossPotential:round(c.grossRevenuePotential,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),equityFraction:round(targetFraction,4),bookParticipation:round(bookParticipation,3),depthCap:round(depthCap,2),volumeCap:round(volumeCap,2),notional:round(notional,2),orderStatus:o?.status||null});}
+  const cash=Math.max(0,+(account.non_marginable_buying_power||account.cash||account.buying_power||0)),equity=Math.max(cash,+(account.equity||account.portfolio_value||0)),configuredTotalCap=num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,85000),currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure),s=sizingCaps(env,c,equity,cash,availableExposure),asset=byNorm.get(norm(c.symbol));
+  if(s.notional>=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25)){
+    try{const o=await buy(env,c,asset,s.notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v20_quote_depth_first_velocity_candidate',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),grossPotential:round(c.grossRevenuePotential,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),equityFraction:round(s.targetFraction,4),liquiditySource:s.liquiditySource,depthCap:round(s.depthCap,2),volumeCap:round(s.volumeCap,2),liquidityCap:round(s.liquidityCap,2),notional:round(s.notional,2),orderStatus:o?.status||null});}
     catch(e){actions.push({action:'crypto_buy_failed',symbol:c.symbol,reason:e.message});}
   }else{
-    actions.push({action:'crypto_buy_skipped',symbol:c.symbol,reason:'insufficient_executable_liquidity_for_min_order',depthCap:round(depthCap,2),volumeCap:round(volumeCap,2),requestedEquityNotional:round(equity*targetFraction,2)});
+    actions.push({action:'crypto_buy_skipped',symbol:c.symbol,reason:'insufficient_executable_liquidity_for_min_order',liquiditySource:s.liquiditySource,depthCap:round(s.depthCap,2),volumeCap:round(s.volumeCap,2),liquidityCap:round(s.liquidityCap,2),requestedEquityNotional:round(equity*s.targetFraction,2)});
   }
   return{status:actions.some(a=>a.action==='crypto_buy'||a.action==='crypto_sell')?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(diag),researched:researched.map(diag),cooldownSymbols:[...cooldowns],actions};
 }
 
 export function cryptoFreeTierStatus(env){
-  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',entryOrderType:'market',hardStopExitOrderType:'market',profitExitOrderType:'protected_limit_ioc',positionPnlSource:'executable_bid_for_profit_and_risk_floor',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_gross_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,grossRevenuePriority:true,megaCapDeprioritization:true,liquidMajorsEligible:true,quoteDepthLiquidity:true,venueVolumeFallbackLiquidity:true,candidateDiagnostics:true,stagnantPositionRotation:true,profitTargetLiquidation:true,dynamicCostAwareProfitTarget:true,fillReliableLiquidation:true,reentryCooldown:true,executableProfitCheck:true,profitFloorProtection:true,liquidityAwarePositionSizing:true,equityScaledPositionSizing:true,maxPortfolioExposurePct:0.85,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true},takeProfitPct:pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),reentryCooldownMinutes:int(env.CRYPTO_REENTRY_COOLDOWN_MINUTES,5),hardStopReentryCooldownMinutes:int(env.CRYPTO_HARDSTOP_REENTRY_COOLDOWN_MINUTES,20),maxBookParticipation:clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),maxDailyVolumeParticipation:clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05)};
+  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',entryOrderType:'market',hardStopExitOrderType:'market',profitExitOrderType:'protected_limit_ioc',positionPnlSource:'executable_bid_for_profit_and_risk_floor',liquiditySizingPolicy:'quote_depth_first_venue_volume_fallback',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_gross_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,grossRevenuePriority:true,megaCapDeprioritization:true,liquidMajorsEligible:true,quoteDepthLiquidity:true,venueVolumeFallbackLiquidity:true,venueVolumeNotDoubleCapped:true,candidateDiagnostics:true,stagnantPositionRotation:true,profitTargetLiquidation:true,dynamicCostAwareProfitTarget:true,fillReliableLiquidation:true,reentryCooldown:true,executableProfitCheck:true,profitFloorProtection:true,liquidityAwarePositionSizing:true,equityScaledPositionSizing:true,maxPortfolioExposurePct:0.85,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true},takeProfitPct:pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),reentryCooldownMinutes:int(env.CRYPTO_REENTRY_COOLDOWN_MINUTES,5),hardStopReentryCooldownMinutes:int(env.CRYPTO_HARDSTOP_REENTRY_COOLDOWN_MINUTES,20),maxBookParticipation:clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),maxDailyVolumeParticipation:clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05)};
 }
