@@ -1,8 +1,7 @@
 import { alpaca, marketDataRaw } from './api.js';
-import { pct, int, clamp } from './config.js';
+import { pct, clamp } from './config.js';
 
 let cryptoCache={at:0,symbols:[]};
-const commonStockLike=s=>/^[A-Z]{1,5}$/.test(s)&&!(s.length===5&&/[WUR]$/.test(s));
 
 async function cryptoSymbols(env){
   if(cryptoCache.symbols.length&&Date.now()-cryptoCache.at<60000)return cryptoCache.symbols;
@@ -22,40 +21,22 @@ function cryptoSnapshotFields(s={}){
 }
 
 export async function routeResearchMarket(env,now){
-  let stockBest={symbol:null,score:0,move:0},cryptoBest={symbol:null,score:0,move:0};
-  try{
-    const d=await marketDataRaw(env,`/v1beta1/screener/stocks/movers?top=${int(env.FREE_TIER_ROUTER_STOCK_TOP,20)}`);
-    for(const z of d?.gainers||[]){
-      const symbol=String(z?.symbol||'').toUpperCase();
-      const move=Math.max(0,(+(z?.percent_change??z?.percentChange??0))/100);
-      if(!commonStockLike(symbol)||!(move>0))continue;
-      const score=move-pct(env.MAX_ENTRY_SLIPPAGE_PCT,0.001)-pct(env.MAX_EXIT_SLIPPAGE_PCT,0.0012);
-      if(score>stockBest.score)stockBest={symbol,score,move};
-    }
-  }catch{}
-
+  const stockBest={symbol:null,score:0,move:0};
+  let cryptoBest={symbol:null,score:0,move:0};
   try{
     const symbols=await cryptoSymbols(env);
     if(symbols.length){
       const d=await marketDataRaw(env,`/v1beta3/crypto/us/snapshots?symbols=${symbols.map(encodeURIComponent).join(',')}`),sn=d?.snapshots||d||{};
-      const fee=pct(env.CRYPTO_TAKER_FEE_PCT,0.0025)*2,slip=pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT,0.0015)+pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT,0.0015);
+      const fee=pct(env.CRYPTO_TAKER_FEE_PCT,0.0025)*2;
+      const slip=(pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT,0.0015)+pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT,0.0015))*0.25;
       for(const symbol of symbols){
         const x=cryptoSnapshotFields(sn[symbol]||{});if(!(x.mid>0)||x.spread>pct(env.CRYPTO_MAX_SPREAD_PCT,0.004))continue;
-        const movement=Math.max(0,x.minRet*2,Math.max(0,x.dayRet)*0.25);
+        const movement=Math.max(0,x.minRet*3.2,Math.max(0,x.dayRet)*0.28);
         const score=movement-fee-slip-x.spread;
         if(score>cryptoBest.score)cryptoBest={symbol,score,move:movement};
       }
     }
   }catch{}
-
   const stockOpen=await alpaca(env,'/v2/clock').then(x=>Boolean(x?.is_open)).catch(()=>false);
-  let market='crypto',reason='crypto_only_available';
-  if(stockOpen){
-    const stockAdjusted=Math.max(0,stockBest.score);
-    const cryptoAdjusted=Math.max(0,cryptoBest.score);
-    if(stockAdjusted>cryptoAdjusted*1.05){market='stock';reason='stock_best_net_opportunity';}
-    else if(cryptoAdjusted>stockAdjusted*1.05){market='crypto';reason='crypto_best_net_opportunity';}
-    else {const minute=new Date(now).getUTCMinutes();market=minute%2===0?'stock':'crypto';reason='opportunity_tie_rotate';}
-  }
-  return{market,reason,stockOpen,stockBest:{...stockBest,score:clamp(stockBest.score,-1,1)},cryptoBest:{...cryptoBest,score:clamp(cryptoBest.score,-1,1)}};
+  return{market:'crypto',reason:'crypto_priority_new_entries_stock_manage_only',stockOpen,newStockEntriesEnabled:false,stockBest,cryptoBest:{...cryptoBest,score:clamp(cryptoBest.score,-1,1)}};
 }
