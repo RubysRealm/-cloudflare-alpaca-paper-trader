@@ -13,8 +13,20 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Brief Cloudflare deployment settle
-        run: sleep 10
+      - name: Wait for expected production strategy
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
+          for i in $(seq 1 30); do
+            CRYPTO="$(curl --fail --silent --show-error --max-time 20 "$BASE/api/crypto/status" || true)"
+            if node -e 'try{const x=JSON.parse(process.argv[1]);process.exit(x.strategy==="free-tier-crypto-v18"?0:1)}catch{process.exit(1)}' "$CRYPTO"; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Expected v18 strategy did not reach production in verification window'
+          exit 1
       - name: Check crypto-priority production runtime
         shell: bash
         run: |
@@ -32,6 +44,6 @@ jobs:
           echo "PRODUCTION_ROUTER=$ROUTER"
           node -e 'const x=JSON.parse(process.argv[1]); if(x.strategy!=="free-tier-deep-stock-v13" || x.build!=="free-tier-research-v4" || x.endpoint!=="paper" || x.status!=="armed" || x.primaryExecutionMarket!=="crypto" || x.newStockEntriesEnabled!==false || x.stockMode!=="manage_only" || x.adaptiveMarketRouting!==false) process.exit(2)' "$BODY"
           node -e 'const x=JSON.parse(process.argv[1]); if(x.mode!=="direct_alpaca_rest" || x.build!=="free-tier-research-v4" || !(x.equity>0) || !Array.isArray(x.positionSummary) || !Array.isArray(x.recentOrders)) process.exit(3)' "$STATE"
-          node -e 'const x=JSON.parse(process.argv[1]); const f=x.freeTier||{},r=x.research||{},tf=r.timeframes||[]; if(x.strategy!=="free-tier-crypto-v17" || x.cryptoEntryBuild!=="free-tier-research-v4" || x.enabled!==true || x.endpoint!=="paper" || x.market!=="24x7" || x.entryOrderType!=="market" || x.exitOrderType!=="market" || x.primaryExecutionMarket!=="crypto" || x.newStockEntriesEnabled!==false || x.adaptiveMarketRouting!==false || f.architecture!=="all_tradable_usd_crypto_gross_velocity_rank" || f.finalists!==6 || r.allActiveTradablePairs!==true || r.fullExecutableUsdUniverse!==true || r.percentageVelocityPriority!==true || r.grossRevenuePriority!==true || r.megaCapDeprioritization!==true || r.quoteDepthLiquidity!==true || r.venueVolumeFallbackLiquidity!==true || r.candidateDiagnostics!==true || r.stagnantPositionRotation!==true || r.profitTargetLiquidation!==true || r.dynamicCostAwareProfitTarget!==true || r.fillReliableLiquidation!==true || r.reentryCooldown!==true || r.equityScaledPositionSizing!==true || r.maxPortfolioExposurePct!==0.85 || r.researchBeforeExecution!==true || r.tradeVolumeObjective!==true || x.reentryCooldownMinutes!==5 || x.hardStopReentryCooldownMinutes!==20 || !(x.takeProfitPct>0) || !["1Min","1Day"].every(t=>tf.includes(t))) process.exit(4)' "$CRYPTO"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`v17Orders=${x.currentStrategyOrderCount} v17Positions=${x.cryptoPositionCount} last=${x.lastCurrentStrategyOrderAt}`); if(x.strategy!=="free-tier-crypto-v17" || x.cryptoEntryBuild!=="free-tier-research-v4" || x.endpoint!=="paper" || x.exitPolicy!=="gross_velocity_profit_rotation" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(5)' "$CRYPTO_LIVE"
+          node -e 'const x=JSON.parse(process.argv[1]); const f=x.freeTier||{},r=x.research||{},tf=r.timeframes||[]; if(x.strategy!=="free-tier-crypto-v18" || x.cryptoEntryBuild!=="free-tier-research-v4" || x.enabled!==true || x.endpoint!=="paper" || x.market!=="24x7" || x.entryOrderType!=="market" || x.exitOrderType!=="market" || x.positionPnlSource!=="alpaca_position_unrealized_plpc" || x.primaryExecutionMarket!=="crypto" || x.newStockEntriesEnabled!==false || x.adaptiveMarketRouting!==false || f.architecture!=="all_tradable_usd_crypto_gross_velocity_rank" || f.finalists!==6 || r.allActiveTradablePairs!==true || r.fullExecutableUsdUniverse!==true || r.percentageVelocityPriority!==true || r.grossRevenuePriority!==true || r.megaCapDeprioritization!==true || r.quoteDepthLiquidity!==true || r.venueVolumeFallbackLiquidity!==true || r.candidateDiagnostics!==true || r.stagnantPositionRotation!==true || r.profitTargetLiquidation!==true || r.dynamicCostAwareProfitTarget!==true || r.fillReliableLiquidation!==true || r.reentryCooldown!==true || r.positionPnlAwareExits!==true || r.equityScaledPositionSizing!==true || r.maxPortfolioExposurePct!==0.85 || r.researchBeforeExecution!==true || r.tradeVolumeObjective!==true || x.reentryCooldownMinutes!==5 || x.hardStopReentryCooldownMinutes!==20 || !(x.takeProfitPct>0) || !["1Min","1Day"].every(t=>tf.includes(t))) process.exit(4)' "$CRYPTO"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`v18Orders=${x.currentStrategyOrderCount} v18Positions=${x.cryptoPositionCount} last=${x.lastCurrentStrategyOrderAt}`); if(x.strategy!=="free-tier-crypto-v18" || x.cryptoEntryBuild!=="free-tier-research-v4" || x.endpoint!=="paper" || x.exitPolicy!=="gross_velocity_profit_rotation" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(5)' "$CRYPTO_LIVE"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`route=${x.market} reason=${x.reason} crypto=${x.cryptoBest?.symbol}:${x.cryptoBest?.score}`); if(x.build!=="free-tier-research-v4" || x.market!=="crypto" || x.reason!=="crypto_priority_new_entries_stock_manage_only" || x.newStockEntriesEnabled!==false || typeof x.cryptoBest?.score!=="number") process.exit(6)' "$ROUTER"
