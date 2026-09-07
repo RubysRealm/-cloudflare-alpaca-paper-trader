@@ -103,7 +103,7 @@ function evaluateCandidates(env,all){
   });
   const qualified=evaluated.filter(x=>x.pass).sort((a,b)=>b.score-a.score);
   const researched=[...evaluated].sort((a,b)=>b.score-a.score).slice(0,8);
-  return{qualified,researched};
+  return{qualified,researched,evaluated};
 }
 
 async function manage(env,now,allAssets,positions,snap,ranked){
@@ -129,6 +129,25 @@ async function manage(env,now,allAssets,positions,snap,ranked){
 }
 
 const diag=x=>({symbol:x.symbol,pass:x.pass,minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),spread:round(x.spread,5),dailyDollarVolume:round(x.dollarVolume,2),quoteNotional:round(x.quoteNotional,2),grossPotential:round(x.grossRevenuePotential,5),net:round(x.net,5),score:round(x.score,4),reasons:x.reasons});
+
+export async function cryptoOpportunityDiagnostics(env,now=Date.now()){
+  const allAssets=await assets(env),symbols=allAssets.map(a=>a.symbol);
+  const [positions,account,orders]=await Promise.all([alpaca(env,'/v2/positions'),alpaca(env,'/v2/account'),alpaca(env,'/v2/orders?status=all&limit=150&direction=desc&nested=false')]);
+  const sn=symbols.length?await snapshots(env,symbols):{},light=symbols.map(symbol=>({symbol,...fields(sn[symbol]||{})}));
+  const {qualified,evaluated}=evaluateCandidates(env,light),byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a]));
+  const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1),heldSet=new Set(held.map(p=>norm(p.symbol))),cooldowns=cooldownSymbols(env,orders,now),maxPos=int(env.CRYPTO_MAX_CONCURRENT_POSITIONS,2);
+  const cash=Math.max(0,+(account.non_marginable_buying_power||account.cash||account.buying_power||0)),equity=Math.max(cash,+(account.equity||account.portfolio_value||0));
+  const configuredCap=Math.min(num(env.CRYPTO_ORDER_NOTIONAL_USD,45000),num(env.CRYPTO_MAX_POSITION_USD,45000)),configuredTotalCap=num(env.CRYPTO_MAX_TOTAL_EXPOSURE_USD,85000),currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure),bookParticipation=clamp(num(env.CRYPTO_MAX_BOOK_PARTICIPATION,0.35),0.05,0.75),dailyParticipation=clamp(num(env.CRYPTO_MAX_DAILY_VOLUME_PARTICIPATION,0.01),0.001,0.05),minOrder=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25);
+  const ranked=[...evaluated].sort((a,b)=>b.score-a.score).slice(0,12).map(c=>{
+    const targetFraction=clamp(0.36+c.score*0.008,0.36,0.45),depthCap=c.quoteNotional>0?c.quoteNotional*bookParticipation:0,volumeCap=c.dollarVolume>0?c.dollarVolume*dailyParticipation:0,notional=Math.max(0,Math.min(configuredCap,equity*targetFraction,cash,availableExposure,depthCap,volumeCap)),blocks=[...c.reasons];
+    if(heldSet.has(norm(c.symbol)))blocks.push('already_held');
+    if(cooldowns.has(norm(c.symbol)))blocks.push('reentry_cooldown');
+    if(held.length>=maxPos)blocks.push('max_positions');
+    if(notional<minOrder)blocks.push('order_below_min_after_liquidity_caps');
+    return{...diag(c),bid:round(c.bid,8),ask:round(c.ask,8),bidNotional:round(c.bidNotional,2),askNotional:round(c.askNotional,2),targetEquityNotional:round(equity*targetFraction,2),depthCap:round(depthCap,2),volumeCap:round(volumeCap,2),finalOrderNotional:round(notional,2),cooldown:cooldowns.has(norm(c.symbol)),eligible:c.pass&&!heldSet.has(norm(c.symbol))&&!cooldowns.has(norm(c.symbol))&&held.length<maxPos&&notional>=minOrder,blocks:[...new Set(blocks)]};
+  });
+  return{strategy:CRYPTO_STRATEGY,readOnly:true,universeCount:symbols.length,qualifiedCount:qualified.length,equity:round(equity,2),cash:round(cash,2),currentExposure:round(currentExposure,2),availableExposure:round(availableExposure,2),maxPositions:maxPos,heldSymbols:[...heldSet],cooldownSymbols:[...cooldowns],bookParticipation,dailyVolumeParticipation:dailyParticipation,candidates:ranked};
+}
 
 export async function runCryptoFreeTier(env,now,{discover=true}={}){
   const allAssets=await assets(env),symbols=allAssets.map(a=>a.symbol);
