@@ -1,8 +1,8 @@
 import { alpaca, marketDataRaw } from './api.js';
 import { num, pct, int, clamp, round } from './config.js';
 
-export const CRYPTO_STRATEGY='free-tier-crypto-v17';
-export const CRYPTO_PREFIX='papercrypto-v17-';
+export const CRYPTO_STRATEGY='free-tier-crypto-v18';
+export const CRYPTO_PREFIX='papercrypto-v18-';
 
 const MEGA_CAPS=new Set(['BTC/USD','ETH/USD','SOL/USD']);
 const norm=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
@@ -99,11 +99,12 @@ function evaluateCandidates(env,all){
 async function manage(env,now,allAssets,positions,snap,ranked){
   const actions=[],byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a])),byRank=new Map(ranked.map(x=>[norm(x.symbol),x])),best=ranked[0]||null;
   const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1);
-  const baseTarget=pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),hardStopPct=pct(env.CRYPTO_HARD_STOP_PCT,0.012),minNetProfit=pct(env.CRYPTO_MIN_NET_PROFIT_PCT,0.004);
+  const baseTarget=pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),hardStopPct=pct(env.CRYPTO_HARD_STOP_PCT,0.012),minNetProfit=pct(env.CRYPTO_MIN_NET_PROFIT_PCT,0.004),maxSpread=pct(env.CRYPTO_MAX_SPREAD_PCT,0.0075);
   const roundFee=pct(env.CRYPTO_TAKER_FEE_PCT,0.0025)*2,fullSlip=pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT,0.0015)+pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT,0.0015);
   for(const p of held){
-    const asset=byNorm.get(norm(p.symbol)),s=asset.symbol,f=fields(snap[s]||{}),entry=+p.avg_entry_price||0,bid=f.bid>0?f.bid:+p.current_price||0,pnl=entry>0&&bid>0?bid/entry-1:0;
-    const current=byRank.get(norm(s)),currentScore=current?.score??-99,dynamicTarget=Math.max(baseTarget,roundFee+fullSlip+f.spread+minNetProfit);
+    const asset=byNorm.get(norm(p.symbol)),s=asset.symbol,f=fields(snap[s]||{}),entry=+p.avg_entry_price||0,mark=+p.current_price||0,bid=f.bid>0?f.bid:mark;
+    const markPnl=entry>0&&mark>0?mark/entry-1:0,reportedPnl=Number(p.unrealized_plpc),pnl=Number.isFinite(reportedPnl)?reportedPnl:markPnl;
+    const current=byRank.get(norm(s)),currentScore=current?.score??-99,effectiveSpread=f.bid>0&&f.ask>0?Math.min(f.spread,maxSpread):Math.min(maxSpread,0.0025),dynamicTarget=Math.max(baseTarget,roundFee+fullSlip+effectiveSpread+minNetProfit);
     const reversal=f.minRet<-0.0012,hardStop=pnl<=-hardStopPct,takeProfit=pnl>=dynamicTarget,profitFade=pnl>=Math.max(0.006,dynamicTarget*0.55)&&reversal;
     const stagnant=Math.abs(f.minRet)<0.00035&&f.dayRet<0.012,megaSlow=MEGA_CAPS.has(s)&&!(f.minRet>=0.008||f.dayRet>=0.08);
     const stronger=best&&norm(best.symbol)!==norm(s)&&best.score>currentScore+0.35,rotate=Boolean(stronger&&(stagnant||megaSlow||!current)&&pnl>-0.0075);
@@ -140,12 +141,12 @@ export async function runCryptoFreeTier(env,now,{discover=true}={}){
   const currentExposure=held.reduce((z,p)=>z+Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0)),0),totalCap=Math.min(configuredTotalCap,equity*0.85),availableExposure=Math.max(0,totalCap-currentExposure);
   const targetFraction=clamp(0.36+c.score*0.008,0.36,0.45),notional=Math.min(configuredCap,equity*targetFraction,cash,availableExposure);
   if(notional>=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25)){
-    try{const o=await buy(env,c,asset,notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v17_fill_reliable_gross_velocity_candidate',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),grossPotential:round(c.grossRevenuePotential,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),equityFraction:round(targetFraction,4),notional:round(notional,2),orderStatus:o?.status||null});}
+    try{const o=await buy(env,c,asset,notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v18_position_pnl_aware_velocity_candidate',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),grossPotential:round(c.grossRevenuePotential,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),equityFraction:round(targetFraction,4),notional:round(notional,2),orderStatus:o?.status||null});}
     catch(e){actions.push({action:'crypto_buy_failed',symbol:c.symbol,reason:e.message});}
   }
   return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(diag),researched:researched.map(diag),cooldownSymbols:[...cooldowns],actions};
 }
 
 export function cryptoFreeTierStatus(env){
-  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',entryOrderType:'market',exitOrderType:'market',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_gross_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,grossRevenuePriority:true,megaCapDeprioritization:true,quoteDepthLiquidity:true,venueVolumeFallbackLiquidity:true,candidateDiagnostics:true,stagnantPositionRotation:true,profitTargetLiquidation:true,dynamicCostAwareProfitTarget:true,fillReliableLiquidation:true,reentryCooldown:true,equityScaledPositionSizing:true,maxPortfolioExposurePct:0.85,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true},takeProfitPct:pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),reentryCooldownMinutes:int(env.CRYPTO_REENTRY_COOLDOWN_MINUTES,5),hardStopReentryCooldownMinutes:int(env.CRYPTO_HARDSTOP_REENTRY_COOLDOWN_MINUTES,20)};
+  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',entryOrderType:'market',exitOrderType:'market',positionPnlSource:'alpaca_position_unrealized_plpc',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_gross_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,grossRevenuePriority:true,megaCapDeprioritization:true,quoteDepthLiquidity:true,venueVolumeFallbackLiquidity:true,candidateDiagnostics:true,stagnantPositionRotation:true,profitTargetLiquidation:true,dynamicCostAwareProfitTarget:true,fillReliableLiquidation:true,reentryCooldown:true,positionPnlAwareExits:true,equityScaledPositionSizing:true,maxPortfolioExposurePct:0.85,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true},takeProfitPct:pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),reentryCooldownMinutes:int(env.CRYPTO_REENTRY_COOLDOWN_MINUTES,5),hardStopReentryCooldownMinutes:int(env.CRYPTO_HARDSTOP_REENTRY_COOLDOWN_MINUTES,20)};
 }
