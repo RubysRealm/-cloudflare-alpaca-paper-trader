@@ -1,8 +1,8 @@
 import { alpaca, marketDataRaw } from './api.js';
 import { num, pct, int, clamp, round } from './config.js';
 
-export const CRYPTO_STRATEGY='free-tier-crypto-v12';
-export const CRYPTO_PREFIX='papercrypto-v12-';
+export const CRYPTO_STRATEGY='free-tier-crypto-v13';
+export const CRYPTO_PREFIX='papercrypto-v13-';
 
 const MEGA_CAPS=new Set(['BTC/USD','ETH/USD','SOL/USD']);
 const norm=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
@@ -58,37 +58,40 @@ function rankCandidates(env,all){
   const fee=pct(env.CRYPTO_TAKER_FEE_PCT,0.0025)*2;
   const expectedSlip=(pct(env.CRYPTO_MAX_ENTRY_SLIPPAGE_PCT,0.0015)+pct(env.CRYPTO_MAX_EXIT_SLIPPAGE_PCT,0.0015))*0.25;
   const maxSpread=pct(env.CRYPTO_MAX_SPREAD_PCT,0.004);
-  return all.map(x=>{
+  const ranked=all.map(x=>{
     const shortMove=Math.max(0,x.minRet),dayMove=Math.max(0,x.dayRet);
-    const projectedMove=Math.max(shortMove*3.2,dayMove*0.28);
+    const projectedMove=Math.max(shortMove*3.5,dayMove*0.30);
     const cost=fee+expectedSlip+x.spread,net=projectedMove-cost;
-    const highVelocity=shortMove>=0.0012||dayMove>=0.018;
-    const antiChase=x.minRet<0.03&&x.dayRet<0.25;
+    const highVelocity=shortMove>=0.0015||dayMove>=0.02;
+    const antiChase=x.minRet<0.035&&x.dayRet<0.30;
     const liquid=x.bid>0&&x.ask>0&&x.spread<=maxSpread&&x.dollarVolume>=50000;
-    const mega=MEGA_CAPS.has(x.symbol),megaExceptional=shortMove>=0.004||dayMove>=0.05;
-    const velocity=shortMove*260+dayMove*14;
-    const discoveryBonus=mega?0:Math.min(1.25,shortMove*120+dayMove*3.5);
-    const megaPenalty=mega&&!megaExceptional?2.5:0;
-    const score=net*180+velocity+discoveryBonus+Math.log10(Math.max(1,x.dollarVolume))*0.01-megaPenalty;
+    const mega=MEGA_CAPS.has(x.symbol),megaExceptional=shortMove>=0.008||dayMove>=0.08;
+    const velocity=shortMove*340+dayMove*18;
+    const discoveryBonus=mega?0:Math.min(1.6,shortMove*150+dayMove*4.5);
+    const megaPenalty=mega&&!megaExceptional?5:0;
+    const grossRevenuePotential=projectedMove*Math.log10(Math.max(10,x.dollarVolume));
+    const score=grossRevenuePotential*40+net*220+velocity+discoveryBonus-megaPenalty;
     const pass=liquid&&highVelocity&&antiChase&&x.minRet>-0.004&&x.dayRet>-0.08&&net>0&&(!mega||megaExceptional);
-    return{...x,projectedMove,cost,net,score,pass,mega,megaExceptional};
+    return{...x,projectedMove,cost,net,grossRevenuePotential,score,pass,mega,megaExceptional};
   }).filter(x=>x.pass).sort((a,b)=>b.score-a.score);
+  return ranked;
 }
 
 async function manage(env,now,allAssets,positions,snap,ranked){
   const actions=[],byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a])),byRank=new Map(ranked.map(x=>[norm(x.symbol),x])),best=ranked[0]||null;
   const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1);
+  const takeProfitPct=pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125),hardStopPct=pct(env.CRYPTO_HARD_STOP_PCT,0.012);
   for(const p of held){
     const asset=byNorm.get(norm(p.symbol)),s=asset.symbol,f=fields(snap[s]||{}),entry=+p.avg_entry_price||0,bid=f.bid>0?f.bid:+p.current_price||0,pnl=entry>0&&bid>0?bid/entry-1:0;
     const current=byRank.get(norm(s)),currentScore=current?.score??-99;
-    const reversal=f.minRet<-0.0015,hardStop=pnl<=-0.012,takeProfit=pnl>=0.015;
+    const reversal=f.minRet<-0.0015,hardStop=pnl<=-hardStopPct,takeProfit=pnl>=takeProfitPct,profitFade=pnl>=0.006&&reversal;
     const stagnant=Math.abs(f.minRet)<0.0005&&f.dayRet<0.015;
-    const megaSlow=MEGA_CAPS.has(s)&&!(f.minRet>=0.004||f.dayRet>=0.05);
-    const stronger=best&&norm(best.symbol)!==norm(s)&&best.score>currentScore+0.35;
-    const rotate=Boolean(stronger&&(stagnant||megaSlow||!current));
-    if(reversal||hardStop||takeProfit||rotate){
-      const reason=hardStop?'hardstop':takeProfit?'takeprofit':rotate?'rotate':'reversal';
-      try{const o=await sell(env,p,asset,bid,now,reason);if(o)actions.push({action:'crypto_sell',symbol:s,reason:hardStop?'hard_stop':takeProfit?'take_profit':rotate?'rotate_to_faster_mover':'momentum_reversal',pnlPct:round(pnl,5),replacement:rotate?best?.symbol:null,orderStatus:o?.status||null});}
+    const megaSlow=MEGA_CAPS.has(s)&&!(f.minRet>=0.008||f.dayRet>=0.08);
+    const stronger=best&&norm(best.symbol)!==norm(s)&&best.score>currentScore+0.45;
+    const rotate=Boolean(stronger&&(stagnant||megaSlow||!current)&&pnl>-0.006);
+    if(hardStop||takeProfit||profitFade||rotate||reversal){
+      const reason=hardStop?'hardstop':takeProfit?'takeprofit':profitFade?'profitfade':rotate?'rotate':'reversal';
+      try{const o=await sell(env,p,asset,bid,now,reason);if(o)actions.push({action:'crypto_sell',symbol:s,reason:hardStop?'hard_stop':takeProfit?'take_profit':profitFade?'profit_momentum_fading':rotate?'rotate_to_faster_mover':'momentum_reversal',pnlPct:round(pnl,5),replacement:rotate?best?.symbol:null,orderStatus:o?.status||null});}
       catch(e){actions.push({action:'crypto_sell_failed',symbol:s,reason:e.message});}
     }
   }
@@ -108,22 +111,22 @@ export async function runCryptoFreeTier(env,now,{discover=true}={}){
   const byNorm=new Map(allAssets.map(a=>[norm(a.symbol),a]));
   const held=(positions||[]).filter(p=>byNorm.has(norm(p.symbol))&&Math.abs(+p.market_value||(+p.qty||0)*(+p.current_price||0))>1);
   const maxPos=int(env.CRYPTO_MAX_CONCURRENT_POSITIONS,2);
-  if(held.length>=maxPos||!finalists.length)return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(x=>({symbol:x.symbol,minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),net:round(x.net,5),score:round(x.score,4)})),actions};
+  if(held.length>=maxPos||!finalists.length)return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(x=>({symbol:x.symbol,minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),grossPotential:round(x.grossRevenuePotential,5),net:round(x.net,5),score:round(x.score,4)})),actions};
 
   const heldSet=new Set(held.map(p=>norm(p.symbol))),c=finalists.find(x=>!heldSet.has(norm(x.symbol)));
   if(!c)return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(x=>x.symbol),actions};
 
   const asset=byNorm.get(norm(c.symbol)),cash=Math.max(0,+(account.non_marginable_buying_power||account.cash||account.buying_power||0));
   const configuredCap=Math.min(num(env.CRYPTO_ORDER_NOTIONAL_USD,25000),num(env.CRYPTO_MAX_POSITION_USD,25000));
-  const baseCap=Math.min(configuredCap,cash*0.12);
-  const confidence=clamp(0.5+c.score*0.06,0.45,1),notional=baseCap*confidence;
+  const baseCap=Math.min(configuredCap,cash*0.25);
+  const confidence=clamp(0.58+c.score*0.035,0.55,1),notional=baseCap*confidence;
   if(notional>=num(env.CRYPTO_MIN_ORDER_NOTIONAL_USD,25)){
-    try{const o=await buy(env,c,asset,notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v12_fast_percentage_mover',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),notional:round(notional,2),orderStatus:o?.status||null});}
+    try{const o=await buy(env,c,asset,notional,now);actions.push({action:'crypto_buy',symbol:c.symbol,reason:'v13_highest_gross_velocity_candidate',minuteMove:round(c.minRet,5),dayMove:round(c.dayRet,5),grossPotential:round(c.grossRevenuePotential,5),expectedNetEdge:round(c.net,5),score:round(c.score,4),notional:round(notional,2),orderStatus:o?.status||null});}
     catch(e){actions.push({action:'crypto_buy_failed',symbol:c.symbol,reason:e.message});}
   }
-  return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(x=>({symbol:x.symbol,minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),net:round(x.net,5),score:round(x.score,4)})),actions};
+  return{status:actions.length?'acted':'hold',strategy:CRYPTO_STRATEGY,mode:'velocity_rank',universeCount:symbols.length,qualified:finalists.map(x=>({symbol:x.symbol,minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),grossPotential:round(x.grossRevenuePotential,5),net:round(x.net,5),score:round(x.score,4)})),actions};
 }
 
 export function cryptoFreeTierStatus(env){
-  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,megaCapDeprioritization:true,stagnantPositionRotation:true,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true}};
+  return{strategy:CRYPTO_STRATEGY,endpoint:'paper',market:'24x7',freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'all_tradable_usd_crypto_gross_velocity_rank',finalists:int(env.FREE_TIER_CRYPTO_FINALISTS,6),alternatingMarketDiscovery:false},research:{allActiveTradablePairs:true,fullExecutableUsdUniverse:true,percentageVelocityPriority:true,grossRevenuePriority:true,megaCapDeprioritization:true,stagnantPositionRotation:true,profitTargetLiquidation:true,timeframes:['1Min','1Day'],crossSectionRelativeStrength:true,researchBeforeExecution:true,tradeVolumeObjective:true,antiChaseEntryTiming:true},takeProfitPct:pct(env.CRYPTO_TAKE_PROFIT_PCT,0.0125)};
 }
