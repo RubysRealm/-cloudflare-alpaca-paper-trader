@@ -1,7 +1,7 @@
 import { TradingState } from './state.js';
 import { alpaca } from './api.js';
 import { runStockFreeTier, stockFreeTierStatus, STOCK_STRATEGY } from './free-tier-stock.js';
-import { runCryptoFreeTier, cryptoFreeTierStatus, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './free-tier-crypto.js';
+import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './free-tier-crypto.js';
 import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
@@ -41,6 +41,7 @@ const app={
     const s=cryptoFreeTierStatus(env);
     return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:false},research:{...s.research,antiChaseEntryTiming:true},enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:false,primaryExecutionMarket:'crypto',newStockEntriesEnabled:false},{headers:{'Cache-Control':'no-store'}});
   }
+  if(url.pathname==='/api/crypto/opportunity')return Response.json(await cryptoOpportunityDiagnostics(env,Date.now()),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/router/opportunity')return Response.json({...await routeResearchMarket(env,Date.now()),build:BUILD},{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
