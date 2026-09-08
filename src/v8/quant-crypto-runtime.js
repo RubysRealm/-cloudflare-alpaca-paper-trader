@@ -80,10 +80,5 @@ export async function cryptoOpportunityDiagnostics(env,now=Date.now()){
 }
 
 export async function cryptoExecutionDirective(env,now=Date.now()){
-  const d=await coreExecutionDirective(env,now);
-  if(d.direction==='NEUTRAL'){
-    const health=await marketDataHealth(env,now);
-    d.market_data_health={provider:health.provider,available_count:health.availableCount,all_unavailable:health.allUnavailable};
-  }
-  return d;
+  return coreExecutionDirective(env,now);
 }
