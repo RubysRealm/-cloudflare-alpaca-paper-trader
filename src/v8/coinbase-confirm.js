@@ -5,15 +5,47 @@ const num=(v,d)=>{const n=Number(v);return Number.isFinite(n)?n:d;};
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const round=(v,d=6)=>{const p=10**d;return Math.round((Number(v)||0)*p)/p;};
 const productId=symbol=>`${String(symbol||'').toUpperCase().split('/')[0]}-USD`;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+// Cloudflare Workers can have only a small number of outbound connections
+// simultaneously waiting on response headers. v24 deep-researches multiple
+// products at once, so keep Coinbase requests below that ceiling globally.
+const MAX_COINBASE_INFLIGHT=3;
+let coinbaseInflight=0;
+const coinbaseWaiters=[];
+async function acquireCoinbaseSlot(){
+  if(coinbaseInflight<MAX_COINBASE_INFLIGHT){coinbaseInflight++;return;}
+  await new Promise(resolve=>coinbaseWaiters.push(resolve));
+  coinbaseInflight++;
+}
+function releaseCoinbaseSlot(){
+  coinbaseInflight=Math.max(0,coinbaseInflight-1);
+  const next=coinbaseWaiters.shift();
+  if(next)next();
+}
 
 async function getJson(url,timeoutMs){
-  const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),timeoutMs);
-  try{
-    const r=await fetch(url,{headers:{Accept:'application/json','User-Agent':'cody-alpaca-paper-guard/2.0','Cache-Control':'no-cache'},signal:controller.signal});
-    if(!r.ok)throw new Error(`coinbase_${r.status}`);
-    return await r.json();
-  }finally{clearTimeout(timer);}
+  let lastError=null;
+  for(let attempt=0;attempt<2;attempt++){
+    await acquireCoinbaseSlot();
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),timeoutMs);
+    try{
+      const r=await fetch(url,{headers:{Accept:'application/json','User-Agent':'cody-alpaca-paper-guard/2.1','Cache-Control':'no-cache'},signal:controller.signal});
+      if(r.ok)return await r.json();
+      try{await r.text();}catch{}
+      lastError=new Error(`coinbase_${r.status}`);
+      if(r.status!==429&&r.status<500)throw lastError;
+    }catch(e){
+      lastError=e;
+      if(attempt===1)throw e;
+    }finally{
+      clearTimeout(timer);
+      releaseCoinbaseSlot();
+    }
+    await sleep(175*(attempt+1));
+  }
+  throw lastError||new Error('coinbase_unavailable');
 }
 
 function candleRows(rows){
@@ -102,6 +134,8 @@ function tradeResearch(trades){
     const p=Number(t?.price)||0,s=Number(t?.size)||0;
     if(!(p>0&&s>0))continue;
     const usd=p*s;count++;
+    // Coinbase Exchange public-trade `side` is maker side. A maker sell means
+    // an aggressive taker buy; maker buy means aggressive taker sell.
     if(String(t?.side).toLowerCase()==='sell')buyUsd+=usd;
     else if(String(t?.side).toLowerCase()==='buy')sellUsd+=usd;
   }
@@ -115,7 +149,7 @@ function tradeResearch(trades){
 export async function confirmCoinbaseMomentum(env,candidate,now=Date.now()){
   const enabled=String(env.CRYPTO_CROSS_VENUE_CONFIRM_ENABLED??'true')==='true';
   if(!enabled)return{enabled:false,available:false,pass:true,reason:'disabled'};
-  const product=productId(candidate?.symbol),timeoutMs=Math.max(750,Math.min(5000,num(env.CRYPTO_COINBASE_TIMEOUT_MS,2500)));
+  const product=productId(candidate?.symbol),timeoutMs=Math.max(1000,Math.min(6000,num(env.CRYPTO_COINBASE_TIMEOUT_MS,3500)));
   const lookback=Math.max(120,Math.min(290,num(env.CRYPTO_COINBASE_LOOKBACK_MINUTES,240)));
   const end=new Date(Number(now)).toISOString(),start=new Date(Number(now)-lookback*60000).toISOString();
   try{
@@ -154,8 +188,8 @@ export async function confirmCoinbaseMomentum(env,candidate,now=Date.now()){
     if(divergence>maxDiv)reasons.push('cross_venue_price_divergence');
     const pass=reasons.length===0;
 
-    const vwap24Rows=candleRows(candles);
-    const pv=vwap24Rows.reduce((z,x)=>z+x.close*x.volume,0),vv=vwap24Rows.reduce((z,x)=>z+x.volume,0),vwap24=vv>0?pv/vv:price;
+    const lookbackRows=candleRows(candles);
+    const pv=lookbackRows.reduce((z,x)=>z+x.close*x.volume,0),vv=lookbackRows.reduce((z,x)=>z+x.volume,0),vwap24=vv>0?pv/vv:price;
     return{
       enabled:true,provider:'coinbase_exchange',product,available:true,pass,reasons,
       candleCount:r.candleCount,ret5:round(r.ret5),ret15:round(r.ret15),ret60:round(r.ret60),
@@ -169,6 +203,13 @@ export async function confirmCoinbaseMomentum(env,candidate,now=Date.now()){
       spoofingPersistenceDetectionAvailable:false,openInterestAvailable:false,fundingRateAvailable:false
     };
   }catch(e){
-    return{enabled:true,provider:'coinbase_exchange',product,available:false,pass:false,reasons:['coinbase_unavailable'],error:String(e?.message||e)};
+    return{
+      enabled:true,provider:'coinbase_exchange',product,available:false,pass:false,reasons:['coinbase_unavailable'],error:String(e?.message||e),
+      candleCount:0,ret5:0,ret15:0,ret60:0,dollarVolume30:0,dollarVolume24:0,rvol15:0,rvol60:0,atrPct5m:0,atrExpansion:0,bbWidthExpansion:0,
+      price:0,bid:0,ask:0,spread:1,vwap24:0,alpacaMid:Number(candidate?.mid)||0,priceDivergence:1,staleSeconds:999999,
+      bidDepthWithin20bps:0,askDepthWithin20bps:0,depthWithin20bps:0,orderBookImbalance:0.5,
+      tradeCount:0,aggressiveBuyUsd:0,aggressiveSellUsd:0,aggressiveBuySellRatio:0,cvdUsd:0,
+      spoofingPersistenceDetectionAvailable:false,openInterestAvailable:false,fundingRateAvailable:false
+    };
   }
 }
