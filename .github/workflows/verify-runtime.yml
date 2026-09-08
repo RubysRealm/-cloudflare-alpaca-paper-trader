@@ -21,12 +21,13 @@ jobs:
           for i in $(seq 1 70); do
             STATUS="$(curl --fail --silent --show-error --max-time 30 "$BASE/api/status" || true)"
             CRYPTO="$(curl --fail --silent --show-error --max-time 30 "$BASE/api/crypto/status" || true)"
-            if node -e 'try{const s=JSON.parse(process.argv[1]);const c=JSON.parse(process.argv[2]);process.exit(s.strategy==="free-tier-deep-stock-v14"&&s.primaryExecutionMarket==="hybrid"&&s.newStockEntriesEnabled===true&&s.maxPositions===1&&s.maxPositionUsd===12000&&c.strategy==="free-tier-crypto-v23"&&c.crossVenueConfirmationEnabled===true&&c.recoveryMaxPositionPct===0.12?0:1)}catch{process.exit(1)}' "$STATUS" "$CRYPTO"; then
+            STOCK_OPP="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/stock/opportunity" || true)"
+            if node -e 'try{const s=JSON.parse(process.argv[1]);const c=JSON.parse(process.argv[2]);const o=JSON.parse(process.argv[3]);process.exit(s.strategy==="free-tier-deep-stock-v14"&&s.primaryExecutionMarket==="hybrid"&&s.newStockEntriesEnabled===true&&s.maxPositions===1&&s.maxPositionUsd===12000&&s.research?.candidateDiagnostics===true&&c.strategy==="free-tier-crypto-v23"&&c.crossVenueConfirmationEnabled===true&&c.recoveryMaxPositionPct===0.12&&o.strategy==="free-tier-deep-stock-v14"&&o.readOnly===true&&Array.isArray(o.candidates)?0:1)}catch{process.exit(1)}' "$STATUS" "$CRYPTO" "$STOCK_OPP"; then
               exit 0
             fi
             sleep 2
           done
-          echo 'Expected hybrid stock v14 + crypto v23 runtime did not reach production'
+          echo 'Expected hybrid runtime with stock diagnostics did not reach production'
           exit 1
       - name: Check hybrid recovery runtime
         shell: bash
@@ -35,18 +36,21 @@ jobs:
           BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
           BODY="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/status")"
           STATE="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/state")"
+          STOCK_OPP="$(curl --fail --silent --show-error --max-time 90 "$BASE/api/stock/opportunity")"
           CRYPTO="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/crypto/status")"
           CRYPTO_LIVE="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/crypto/live")"
           OPPORTUNITY="$(curl --fail --silent --show-error --max-time 90 "$BASE/api/crypto/opportunity")"
           ROUTER="$(curl --fail --silent --show-error --max-time 75 "$BASE/api/router/opportunity")"
           echo "PRODUCTION_STATUS=$BODY"
           echo "PRODUCTION_STATE=$STATE"
+          echo "PRODUCTION_STOCK_OPPORTUNITY=$STOCK_OPP"
           echo "PRODUCTION_CRYPTO=$CRYPTO"
           echo "PRODUCTION_CRYPTO_LIVE=$CRYPTO_LIVE"
           echo "PRODUCTION_CRYPTO_OPPORTUNITY=$OPPORTUNITY"
           echo "PRODUCTION_ROUTER=$ROUTER"
-          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{}; if(x.strategy!=="free-tier-deep-stock-v14" || x.endpoint!=="paper" || x.status!=="armed" || x.primaryExecutionMarket!=="hybrid" || x.newStockEntriesEnabled!==true || x.stockMode!=="liquid_intraday_recovery" || x.cryptoMode!=="cross_venue_recovery" || x.entryEnabled!==true || x.maxPositions!==1 || x.maxPositionUsd!==12000 || r.costAdjustedEdge!==true || r.explicitHardStop!==true || r.hardStopMarketExit!==true || r.dynamicProfitTarget!==true) process.exit(2)' "$BODY"
+          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{}; if(x.strategy!=="free-tier-deep-stock-v14" || x.endpoint!=="paper" || x.status!=="armed" || x.primaryExecutionMarket!=="hybrid" || x.newStockEntriesEnabled!==true || x.stockMode!=="liquid_intraday_recovery" || x.cryptoMode!=="cross_venue_recovery" || x.entryEnabled!==true || x.maxPositions!==1 || x.maxPositionUsd!==12000 || r.costAdjustedEdge!==true || r.explicitHardStop!==true || r.hardStopMarketExit!==true || r.dynamicProfitTarget!==true || r.candidateDiagnostics!==true) process.exit(2)' "$BODY"
           node -e 'const x=JSON.parse(process.argv[1]); if(x.mode!=="direct_alpaca_rest" || x.build!=="free-tier-research-v5-hybrid" || !(x.equity>0) || !Array.isArray(x.positionSummary) || !Array.isArray(x.recentOrders)) process.exit(3)' "$STATE"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`stock discovery=${x.discoveryCount} light=${x.lightQualifiedCount} deep=${x.deepQualifiedCount} candidates=${x.candidates?.slice(0,5).map(c=>c.symbol+":"+(c.deepPass?"PASS":(c.deepReasons?.join("+")||c.lightReasons?.join("+")))).join(",")}`); if(x.strategy!=="free-tier-deep-stock-v14" || x.readOnly!==true || !Array.isArray(x.candidates) || typeof x.marketOpen!=="boolean") process.exit(8)' "$STOCK_OPP"
           node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{},tf=r.timeframes||[]; if(x.strategy!=="free-tier-crypto-v23" || x.enabled!==true || x.endpoint!=="paper" || x.entryOrderType!=="protected_limit_ioc" || x.positionPnlSource!=="executable_bid_only" || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueConfirmationEnabled!==true || r.multiTimeframeConfirmation!==true || r.crossVenueConfirmation!==true || r.controlledRecoveryMode!==true || x.recoveryModeEnabled!==true || x.recoveryMaxPositionPct!==0.12 || !["1Min","5Min","15Min","30Min","1Day"].every(t=>tf.includes(t))) process.exit(4)' "$CRYPTO"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`v23Orders=${x.currentStrategyOrderCount} v23Positions=${x.cryptoPositionCount} pnl=${x.performance?.realizedPnl}`); if(x.strategy!=="free-tier-crypto-v23" || x.endpoint!=="paper" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(5)' "$CRYPTO_LIVE"
           node -e 'const x=JSON.parse(process.argv[1]); console.log(`cryptoQualified=${x.qualifiedCount} held=${x.heldSymbols?.join(",")} dd=${x.dailyDrawdownPct} recovery=${x.recoveryModeActive}`); if(x.strategy!=="free-tier-crypto-v23" || x.readOnly!==true || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueRequired!==true || !Array.isArray(x.candidates)) process.exit(6)' "$OPPORTUNITY"
