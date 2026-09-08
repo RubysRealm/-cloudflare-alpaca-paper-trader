@@ -24,6 +24,10 @@ jobs:
       - name: Syntax check v8 modules
         run: |
           node --check src/v8/main.js
+          node --check src/v8/quant-crypto-v24.js
+          node --check src/v8/coinbase-confirm.js
+          node --check src/v8/free-tier-stock.js
+          node --check src/v8/free-tier-router.js
           node --check src/v8/crypto-conviction.js
           node --check src/v8/index.js
           node --check src/v8/api.js
