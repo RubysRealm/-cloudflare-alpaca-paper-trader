@@ -47,7 +47,7 @@ async function deepCandidate(env,symbol,snapshot,news){
     fetchBars(env,symbol,'1Min',40),fetchBars(env,symbol,'5Min',45),fetchBars(env,symbol,'15Min',32),fetchBars(env,symbol,'1Hour',24),fetchBars(env,symbol,'1Day',20),tradeTape(env,symbol)
   ]);
   const base=combineSignals(symbol,timeframeSignal(symbol,m1.bars),timeframeSignal(symbol,m5.bars),timeframeSignal(symbol,m15.bars),snapshot||{});
-  if(!base?.valid) return null;
+  if(!base?.valid) return {symbol,deepPass:false,deepReasons:['signal_unavailable']};
   const hs=timeframeSignal(symbol,h1.bars), ds=timeframeSignal(symbol,d1.bars), sf=snapFields(snapshot);
   const catalyst=news||{score:0,positive:0,negative:0,severe:false,headlines:[]};
   const flow=(base.s1?.ret1>0&&base.s5?.ret1>=0)||(base.s5?.ret3>0&&base.s15?.ret1>=0);
@@ -60,9 +60,31 @@ async function deepCandidate(env,symbol,snapshot,news){
   let probability=0.42+(base.trendVotes||0)*0.035+(higherSupport?0.08:-0.07)+(dailySupport?0.07:-0.08)+(flow?0.06:-0.04)+clamp(tape.pressure*14,-0.08,0.08)+clamp((catalyst.score||0)/100,-0.16,0.12);
   probability=clamp(probability,0.08,0.94);
   const score=Math.max(0,net)*probability*(1+clamp(movement*55,0,3));
-  const minNet=pct(env.STOCK_MIN_EXPECTED_NET_EDGE_PCT,0.0025),maxSpread=pct(env.STOCK_MAX_SPREAD_PCT,0.002);
-  const pass=!catalyst.severe&&flow&&higherSupport&&dailySupport&&timing&&tape.ok&&tape.lastVsVwap>-0.0015&&sf.spread<=maxSpread&&net>=minNet;
-  return {...base,symbol,probability,opportunityScore:score,movementOpportunity:movement,expectedNetEdge:net,expectedGrossMove:gross,catalyst,tape,dailySupport,higherSupport,entryTimingOk:timing,deepPass:pass};
+  const minNet=pct(env.STOCK_MIN_EXPECTED_NET_EDGE_PCT,0.0025),maxSpread=pct(env.STOCK_MAX_SPREAD_PCT,0.002),deepReasons=[];
+  if(catalyst.severe)deepReasons.push('severe_news_risk');
+  if(!flow)deepReasons.push('short_term_flow');
+  if(!higherSupport)deepReasons.push('one_hour_trend');
+  if(!dailySupport)deepReasons.push('daily_trend');
+  if(!timing)deepReasons.push('entry_timing');
+  if(!tape.ok)deepReasons.push('recent_trade_tape');
+  if(tape.ok&&tape.lastVsVwap<=-0.0015)deepReasons.push('tape_below_vwap');
+  if(sf.spread>maxSpread)deepReasons.push('spread');
+  if(net<minNet)deepReasons.push('net_edge');
+  const pass=deepReasons.length===0;
+  return {...base,symbol,probability,opportunityScore:score,movementOpportunity:movement,expectedNetEdge:net,expectedGrossMove:gross,estimatedRoundTripFriction:cost,catalyst,tape,dailySupport,higherSupport,entryTimingOk:timing,deepPass:pass,deepReasons};
+}
+
+function lightDiagnostics(env,symbols,snap){
+  const minDv=num(env.STOCK_MIN_DOLLAR_VOLUME_USD,8000000),maxSpread=pct(env.STOCK_MAX_SPREAD_PCT,0.002),minDay=pct(env.STOCK_MIN_DAY_MOMENTUM_PCT,0.005);
+  return symbols.map(symbol=>{
+    const x={symbol,...snapFields(snap[symbol]||{})},reasons=[];
+    if(!(x.mid>1&&x.ask>0&&x.bid>0))reasons.push('invalid_quote_or_price');
+    if(x.spread>maxSpread)reasons.push('spread');
+    if(x.dollarVolume<minDv)reasons.push('iex_dollar_volume');
+    if(x.minRet<=-0.003)reasons.push('minute_downmove');
+    if(x.dayRet<minDay)reasons.push('day_momentum');
+    return {...x,lightPass:reasons.length===0,lightReasons:reasons};
+  }).sort((a,b)=>(b.minRet*2+b.dayRet*0.55+Math.log10(Math.max(1,b.dollarVolume))*0.0002)-(a.minRet*2+a.dayRet*0.55+Math.log10(Math.max(1,a.dollarVolume))*0.0002));
 }
 
 async function managePositions(env,now,positions,orders,snapshots){
@@ -85,6 +107,19 @@ async function managePositions(env,now,positions,orders,snapshots){
   return actions;
 }
 
+export async function stockOpportunityDiagnostics(env,now=Date.now()){
+  const clock=await alpaca(env,'/v2/clock');
+  const [positions,orders,account]=await Promise.all([alpaca(env,'/v2/positions'),alpaca(env,'/v2/orders?status=all&limit=300&direction=desc&nested=false'),alpaca(env,'/v2/account')]);
+  const {hour,minute}=etParts(now),mins=hour*60+minute,start=int(env.STOCK_ENTRY_START_MINUTE_ET,585),end=int(env.STOCK_ENTRY_END_MINUTE_ET,930);
+  if(!clock.is_open)return{strategy:STOCK_STRATEGY,readOnly:true,marketOpen:false,entryWindowOpen:false,reason:'market_closed',candidates:[]};
+  const symbols=await discoverySymbols(env); if(!symbols.length)return{strategy:STOCK_STRATEGY,readOnly:true,marketOpen:true,entryWindowOpen:mins>=start&&mins<end,reason:'no_discovery',candidates:[]};
+  const snap=(await fetchSnapshots(env,symbols)).snapshots||{},lights=lightDiagnostics(env,symbols,snap),passing=lights.filter(x=>x.lightPass),finalists=passing.slice(0,Math.max(1,int(env.FREE_TIER_STOCK_FINALISTS,3)));
+  const news=await recentNewsContext(env,finalists.map(x=>x.symbol),now,180);
+  const deep=await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))));
+  const deepBy=new Map(deep.map(x=>[x.symbol,x])),lots=botLotsFromOrders(orders),stockPositions=(positions||[]).filter(p=>String(p.asset_class||'').toLowerCase()!=='crypto'&&!String(p.symbol||'').includes('/')&&Math.abs(+p.market_value||0)>1),botPositions=stockPositions.filter(p=>lots[p.symbol]?.qty>1e-8);
+  return{strategy:STOCK_STRATEGY,readOnly:true,marketOpen:true,entryWindowOpen:mins>=start&&mins<end,entryEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',equity:+account.equity||0,buyingPower:+account.buying_power||0,discoveryCount:symbols.length,lightQualifiedCount:passing.length,deepQualifiedCount:deep.filter(x=>x?.deepPass).length,maxPositions:int(env.STOCK_MAX_CONCURRENT_POSITIONS,1),currentBotPositions:botPositions.map(p=>p.symbol),thresholds:{minIexDollarVolume:num(env.STOCK_MIN_DOLLAR_VOLUME_USD,8000000),maxSpreadPct:pct(env.STOCK_MAX_SPREAD_PCT,0.002),minDayMomentumPct:pct(env.STOCK_MIN_DAY_MOMENTUM_PCT,0.005),minExpectedNetEdgePct:pct(env.STOCK_MIN_EXPECTED_NET_EDGE_PCT,0.0025),maxPositionUsd:num(env.STOCK_MAX_POSITION_USD,12000)},candidates:lights.slice(0,15).map(x=>{const d=deepBy.get(x.symbol);return{symbol:x.symbol,lightPass:x.lightPass,lightReasons:x.lightReasons,bid:round(x.bid,4),ask:round(x.ask,4),spreadPct:round(x.spread,5),minuteMove:round(x.minRet,5),dayMove:round(x.dayRet,5),iexDollarVolume:round(x.dollarVolume,0),deepResearched:Boolean(d),deepPass:Boolean(d?.deepPass),deepReasons:d?.deepReasons||[],probability:d?round(d.probability,3):null,expectedGrossMove:d?round(d.expectedGrossMove,5):null,estimatedFriction:d?round(d.estimatedRoundTripFriction,5):null,expectedNetEdge:d?round(d.expectedNetEdge,5):null,opportunityScore:d?round(d.opportunityScore,6):null,tapeOk:d?.tape?.ok??null,tapeVsVwap:d?round(d.tape?.lastVsVwap||0,5):null,higherSupport:d?.higherSupport??null,dailySupport:d?.dailySupport??null,entryTimingOk:d?.entryTimingOk??null};})};
+}
+
 export async function runStockFreeTier(env,now,{discover=true}={}){
   const clock=await alpaca(env,'/v2/clock');
   const [positions,orders,account]=await Promise.all([alpaca(env,'/v2/positions'),alpaca(env,'/v2/orders?status=all&limit=300&direction=desc&nested=false'),alpaca(env,'/v2/account')]);
@@ -95,15 +130,12 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   const {hour,minute}=etParts(now),mins=hour*60+minute,start=int(env.STOCK_ENTRY_START_MINUTE_ET,585),end=int(env.STOCK_ENTRY_END_MINUTE_ET,930); if(mins<start||mins>=end) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'outside_entry_window',actions};
 
   const symbols=await discoverySymbols(env); if(!symbols.length) return {status:'hold',strategy:STOCK_STRATEGY,mode:'no_discovery'};
-  const snap=(await fetchSnapshots(env,symbols)).snapshots||{};
-  const minDv=num(env.STOCK_MIN_DOLLAR_VOLUME_USD,20000000),maxSpread=pct(env.STOCK_MAX_SPREAD_PCT,0.002),minDay=pct(env.STOCK_MIN_DAY_MOMENTUM_PCT,0.005);
-  const light=symbols.map(symbol=>({symbol,...snapFields(snap[symbol]||{})})).filter(x=>x.mid>1&&x.ask>0&&x.bid>0&&x.spread<=maxSpread&&x.dollarVolume>=minDv&&x.minRet>-0.003&&x.dayRet>=minDay)
-    .sort((a,b)=>(b.minRet*2+b.dayRet*0.55+Math.log10(Math.max(1,b.dollarVolume))*0.0002)-(a.minRet*2+a.dayRet*0.55+Math.log10(Math.max(1,a.dollarVolume))*0.0002));
+  const snap=(await fetchSnapshots(env,symbols)).snapshots||{},lights=lightDiagnostics(env,symbols,snap),light=lights.filter(x=>x.lightPass);
   const finalists=light.slice(0,Math.max(1,int(env.FREE_TIER_STOCK_FINALISTS,3)));
   const news=await recentNewsContext(env,finalists.map(x=>x.symbol),now,180);
-  const deep=(await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))))).filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
+  const deepAll=await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))),deep=deepAll.filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
   const botLots=botLotsFromOrders(orders),botPos=(positions||[]).filter(p=>botLots[p.symbol]?.qty>1e-8),maxPos=int(env.STOCK_MAX_CONCURRENT_POSITIONS,1);
-  if(botPos.length>=maxPos||!deep.length) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
+  if(botPos.length>=maxPos||!deep.length) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),rejections:deepAll.filter(x=>!x?.deepPass).map(x=>({symbol:x?.symbol,reasons:x?.deepReasons||['unknown']})),actions};
   const c=deep[0]; let asset=await fetchAsset(env,c.symbol); if(!asset||asset.tradable===false||asset.fractionable===false) return {status:'hold',strategy:STOCK_STRATEGY,mode:'asset_block'};
   const bp=Math.max(0,+account.buying_power||0),base=Math.min(num(env.STOCK_ORDER_NOTIONAL_USD,12000),num(env.STOCK_MAX_POSITION_USD,12000),bp);
   const notional=Math.min(base,base*clamp(0.70+c.probability*0.45+Math.min(0.18,c.movementOpportunity*10),0.70,1));
@@ -111,4 +143,4 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
 }
 
-export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',entryEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',maxPositions:int(env.STOCK_MAX_CONCURRENT_POSITIONS,1),maxPositionUsd:num(env.STOCK_MAX_POSITION_USD,12000),entryWindowET:[int(env.STOCK_ENTRY_START_MINUTE_ET,585),int(env.STOCK_ENTRY_END_MINUTE_ET,930)],freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'marketwide_liquid_movers_then_top3_deep_research',finalists:int(env.FREE_TIER_STOCK_FINALISTS,3),alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,multiFinalistResearch:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,antiChaseEntryTiming:true,costAdjustedEdge:true,explicitHardStop:true,hardStopMarketExit:true,dynamicProfitTarget:true,tradeVolumeObjective:false}};}
+export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',entryEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',maxPositions:int(env.STOCK_MAX_CONCURRENT_POSITIONS,1),maxPositionUsd:num(env.STOCK_MAX_POSITION_USD,12000),entryWindowET:[int(env.STOCK_ENTRY_START_MINUTE_ET,585),int(env.STOCK_ENTRY_END_MINUTE_ET,930)],freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'marketwide_liquid_movers_then_top3_deep_research',finalists:int(env.FREE_TIER_STOCK_FINALISTS,3),alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,multiFinalistResearch:true,candidateDiagnostics:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,antiChaseEntryTiming:true,costAdjustedEdge:true,explicitHardStop:true,hardStopMarketExit:true,dynamicProfitTarget:true,tradeVolumeObjective:false}};}
