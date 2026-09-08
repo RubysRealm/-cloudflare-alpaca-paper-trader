@@ -13,22 +13,22 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for expected production strategy and diagnostics
+      - name: Wait for expected hybrid production runtime
         shell: bash
         run: |
           set -euo pipefail
           BASE='https://cody-alpaca-paper-guard.codygiles28.workers.dev'
-          for i in $(seq 1 60); do
+          for i in $(seq 1 70); do
+            STATUS="$(curl --fail --silent --show-error --max-time 30 "$BASE/api/status" || true)"
             CRYPTO="$(curl --fail --silent --show-error --max-time 30 "$BASE/api/crypto/status" || true)"
-            OPP="$(curl --fail --silent --show-error --max-time 50 "$BASE/api/crypto/opportunity" || true)"
-            if node -e 'try{const x=JSON.parse(process.argv[1]);const o=JSON.parse(process.argv[2]);process.exit(x.strategy==="free-tier-crypto-v23"&&x.crossVenueProvider==="coinbase_exchange"&&x.crossVenueConfirmationEnabled===true&&x.recoveryMaxPositionPct===0.12&&o.strategy==="free-tier-crypto-v23"&&o.crossVenueProvider==="coinbase_exchange"&&o.crossVenueRequired===true&&o.readOnly===true&&Array.isArray(o.candidates)?0:1)}catch{process.exit(1)}' "$CRYPTO" "$OPP"; then
+            if node -e 'try{const s=JSON.parse(process.argv[1]);const c=JSON.parse(process.argv[2]);process.exit(s.strategy==="free-tier-deep-stock-v14"&&s.primaryExecutionMarket==="hybrid"&&s.newStockEntriesEnabled===true&&s.maxPositions===1&&s.maxPositionUsd===12000&&c.strategy==="free-tier-crypto-v23"&&c.crossVenueConfirmationEnabled===true&&c.recoveryMaxPositionPct===0.12?0:1)}catch{process.exit(1)}' "$STATUS" "$CRYPTO"; then
               exit 0
             fi
             sleep 2
           done
-          echo 'Expected v23 higher recovery sizing did not reach production in verification window'
+          echo 'Expected hybrid stock v14 + crypto v23 runtime did not reach production'
           exit 1
-      - name: Check crypto-priority production runtime
+      - name: Check hybrid recovery runtime
         shell: bash
         run: |
           set -euo pipefail
@@ -45,9 +45,9 @@ jobs:
           echo "PRODUCTION_CRYPTO_LIVE=$CRYPTO_LIVE"
           echo "PRODUCTION_CRYPTO_OPPORTUNITY=$OPPORTUNITY"
           echo "PRODUCTION_ROUTER=$ROUTER"
-          node -e 'const x=JSON.parse(process.argv[1]); if(x.strategy!=="free-tier-deep-stock-v13" || x.endpoint!=="paper" || x.status!=="armed" || x.primaryExecutionMarket!=="crypto" || x.newStockEntriesEnabled!==false || x.stockMode!=="manage_only") process.exit(2)' "$BODY"
-          node -e 'const x=JSON.parse(process.argv[1]); if(x.mode!=="direct_alpaca_rest" || !(x.equity>0) || !Array.isArray(x.positionSummary) || !Array.isArray(x.recentOrders)) process.exit(3)' "$STATE"
-          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{},tf=r.timeframes||[]; if(x.strategy!=="free-tier-crypto-v23" || x.enabled!==true || x.endpoint!=="paper" || x.entryOrderType!=="protected_limit_ioc" || x.positionPnlSource!=="executable_bid_only" || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueConfirmationEnabled!==true || r.multiTimeframeConfirmation!==true || r.persistenceConfirmation!==true || r.thirtyMinuteContext!==true || r.crossVenueConfirmation!==true || r.crossVenueRealTradeCandles!==true || r.crossVenueTickerLiquidity!==true || r.crossVenuePriceSanity!==true || r.controlledRecoveryMode!==true || r.recoveryLossLockout!==true || r.recoveryRequiresHighConviction!==true || r.volumeExpansionResearch!==false || r.dailyDrawdownCircuitBreaker!==true || r.qualityOverTurnover!==true || r.maxPortfolioExposurePct!==0.50 || x.recoveryModeEnabled!==true || x.recoveryMaxPositionPct!==0.12 || x.recoveryLossCooldownMinutes!==180 || x.recoveryMin5mPct!==0.006 || x.recoveryMin15mPct!==0.008 || x.recoveryMinNetEdgePct!==0.004 || x.coinbaseMin5mPct!==0.003 || x.coinbaseMin15mPct!==0.005 || x.coinbaseMin30mDollarVolume!==100000 || x.maxCrossVenuePriceDivergencePct!==0.012 || !["1Min","5Min","15Min","30Min","1Day"].every(t=>tf.includes(t))) process.exit(4)' "$CRYPTO"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`v23Orders=${x.currentStrategyOrderCount} v23Positions=${x.cryptoPositionCount} last=${x.lastCurrentStrategyOrderAt}`); if(x.strategy!=="free-tier-crypto-v23" || x.endpoint!=="paper" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(5)' "$CRYPTO_LIVE"
-          node -e 'const x=JSON.parse(process.argv[1]); const r=x.candidates.filter(c=>c.recoveryEligible); console.log(`qualified=${x.qualifiedCount} recoveryEligible=${r.map(c=>c.symbol+":"+c.recoveryOrderNotional).join(",")} preview=${x.crossVenuePreviewSymbol}:${x.crossVenuePreview?.pass} held=${x.heldSymbols?.join(",")} dd=${x.dailyDrawdownPct} recovery=${x.recoveryModeActive} lossLock=${x.recoveryLossLocked}`); if(x.strategy!=="free-tier-crypto-v23" || x.readOnly!==true || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueRequired!==true || !Array.isArray(x.candidates) || typeof x.dailyDrawdownBlocked!=="boolean" || typeof x.recoveryModeActive!=="boolean" || typeof x.recoveryLossLocked!=="boolean") process.exit(7)' "$OPPORTUNITY"
-          node -e 'const x=JSON.parse(process.argv[1]); console.log(`route=${x.market} reason=${x.reason} crypto=${x.cryptoBest?.symbol}:${x.cryptoBest?.score}`); if(x.market!=="crypto" || x.newStockEntriesEnabled!==false || typeof x.cryptoBest?.score!=="number") process.exit(6)' "$ROUTER"
+          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{}; if(x.strategy!=="free-tier-deep-stock-v14" || x.endpoint!=="paper" || x.status!=="armed" || x.primaryExecutionMarket!=="hybrid" || x.newStockEntriesEnabled!==true || x.stockMode!=="liquid_intraday_recovery" || x.cryptoMode!=="cross_venue_recovery" || x.entryEnabled!==true || x.maxPositions!==1 || x.maxPositionUsd!==12000 || r.costAdjustedEdge!==true || r.explicitHardStop!==true || r.hardStopMarketExit!==true || r.dynamicProfitTarget!==true) process.exit(2)' "$BODY"
+          node -e 'const x=JSON.parse(process.argv[1]); if(x.mode!=="direct_alpaca_rest" || x.build!=="free-tier-research-v5-hybrid" || !(x.equity>0) || !Array.isArray(x.positionSummary) || !Array.isArray(x.recentOrders)) process.exit(3)' "$STATE"
+          node -e 'const x=JSON.parse(process.argv[1]); const r=x.research||{},tf=r.timeframes||[]; if(x.strategy!=="free-tier-crypto-v23" || x.enabled!==true || x.endpoint!=="paper" || x.entryOrderType!=="protected_limit_ioc" || x.positionPnlSource!=="executable_bid_only" || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueConfirmationEnabled!==true || r.multiTimeframeConfirmation!==true || r.crossVenueConfirmation!==true || r.controlledRecoveryMode!==true || x.recoveryModeEnabled!==true || x.recoveryMaxPositionPct!==0.12 || !["1Min","5Min","15Min","30Min","1Day"].every(t=>tf.includes(t))) process.exit(4)' "$CRYPTO"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`v23Orders=${x.currentStrategyOrderCount} v23Positions=${x.cryptoPositionCount} pnl=${x.performance?.realizedPnl}`); if(x.strategy!=="free-tier-crypto-v23" || x.endpoint!=="paper" || x.legacyExecutionActive!==false || !Array.isArray(x.cryptoPositions) || !Array.isArray(x.recentCurrentStrategyOrders)) process.exit(5)' "$CRYPTO_LIVE"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`cryptoQualified=${x.qualifiedCount} held=${x.heldSymbols?.join(",")} dd=${x.dailyDrawdownPct} recovery=${x.recoveryModeActive}`); if(x.strategy!=="free-tier-crypto-v23" || x.readOnly!==true || x.crossVenueProvider!=="coinbase_exchange" || x.crossVenueRequired!==true || !Array.isArray(x.candidates)) process.exit(6)' "$OPPORTUNITY"
+          node -e 'const x=JSON.parse(process.argv[1]); console.log(`route=${x.market} stockOpen=${x.stockOpen} stockEnabled=${x.newStockEntriesEnabled} crypto=${x.cryptoBest?.symbol}:${x.cryptoBest?.score}`); if(x.newStockEntriesEnabled!==true || typeof x.cryptoBest?.score!=="number" || !["hybrid","crypto"].includes(x.market)) process.exit(7)' "$ROUTER"
