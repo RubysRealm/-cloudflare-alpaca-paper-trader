@@ -21,6 +21,8 @@ function cryptoSnapshotFields(s={}){
 }
 
 export async function routeResearchMarket(env,now){
+  const stockOpen=await alpaca(env,'/v2/clock').then(x=>Boolean(x?.is_open)).catch(()=>false);
+  const stockEnabled=String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true';
   const stockBest={symbol:null,score:0,move:0};
   let cryptoBest={symbol:null,score:0,move:0};
   try{
@@ -37,6 +39,5 @@ export async function routeResearchMarket(env,now){
       }
     }
   }catch{}
-  const stockOpen=await alpaca(env,'/v2/clock').then(x=>Boolean(x?.is_open)).catch(()=>false);
-  return{market:'crypto',reason:'crypto_priority_new_entries_stock_manage_only',stockOpen,newStockEntriesEnabled:false,stockBest,cryptoBest:{...cryptoBest,score:clamp(cryptoBest.score,-1,1)}};
+  return{market:stockOpen&&stockEnabled?'hybrid':'crypto',reason:stockOpen&&stockEnabled?'parallel_cost_adjusted_stock_and_cross_venue_crypto':'crypto_only_outside_stock_session',stockOpen,newStockEntriesEnabled:stockEnabled,stockBest,cryptoBest:{...cryptoBest,score:clamp(cryptoBest.score,-1,1)}};
 }
