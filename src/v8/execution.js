@@ -96,9 +96,10 @@ export async function placeLimitSell(env, p, s, now, reason) {
   const qty = Math.abs(+p.qty || 0);
   if (!(qty > 0)) throw new Error("exit_quantity_too_small");
   const { hour, minute } = marketEtParts(now);
-  const forcedMarketExit = reason === "end_of_day_flatten" || reason === "session_open_reset" || (hour === 9 && minute === 30);
+  const riskExit = ['dynamic_stop','thesis_failed','trend_failure'].includes(reason);
+  const forcedMarketExit = riskExit || reason === "end_of_day_flatten" || reason === "session_open_reset" || (hour === 9 && minute === 30);
   if (forcedMarketExit) {
-    const tag = hour === 9 && minute === 30 ? "openreset" : "eodflat";
+    const tag = riskExit ? reason.slice(0,8) : hour === 9 && minute === 30 ? "openreset" : "eodflat";
     return alpaca(env, "/v2/orders", { method: "POST", body: JSON.stringify({ symbol: p.symbol, qty: qty.toFixed(8), side: "sell", type: "market", time_in_force: "day", client_order_id: cid("paper8-sell", p.symbol, now, tag) }) });
   }
   let q = null; try { q = await freshQuote(env, p.symbol); } catch {}
