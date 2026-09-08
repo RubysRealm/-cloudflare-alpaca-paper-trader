@@ -6,7 +6,7 @@ import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
 
-const BUILD='free-tier-research-v4';
+const BUILD='free-tier-research-v5-hybrid';
 
 function cryptoPerformance(orders){
   const inv={},closed=[];
@@ -35,31 +35,30 @@ const app={
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
   if(url.pathname==='/api/status'){
     const s=stockFreeTierStatus(env);
-    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:false,primaryExecutionMarket:'crypto',newStockEntriesEnabled:false,stockMode:'manage_only'},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'cross_venue_recovery'},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/crypto/status'){
     const s=cryptoFreeTierStatus(env);
-    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:false},research:{...s.research,antiChaseEntryTiming:true},enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:false,primaryExecutionMarket:'crypto',newStockEntriesEnabled:false},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{...s.research,antiChaseEntryTiming:true},enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true'},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/crypto/opportunity')return Response.json(await cryptoOpportunityDiagnostics(env,Date.now()),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/router/opportunity')return Response.json({...await routeResearchMarket(env,Date.now()),build:BUILD},{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/portfolio/history'){try{return Response.json(await alpaca(env,'/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=continuous&pnl_reset=no_reset'),{headers:{'Cache-Control':'no-store'}});}catch(e){return Response.json({error:e.message},{status:502});}}
-  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'crypto',newStockEntriesEnabled:false,stockMode:'manage_only'});
+  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'cross_venue_recovery'});
  },
  async scheduled(controller,env,ctx){
   const now=controller.scheduledTime;
   ctx.waitUntil((async()=>{
     const route=await routeResearchMarket(env,now);
-    const cryptoResult=await runCryptoFreeTier(env,now,{discover:true});
-    let stockManageResult=null;
-    if(Math.floor(Number(now)/60000)%5===0){
-      try{stockManageResult=await runStockFreeTier(env,now,{discover:false});}
-      catch(e){stockManageResult={status:'error',mode:'manage_only',message:e.message};}
-    }
-    console.log(JSON.stringify({event:'crypto_priority_cycle',build:BUILD,route,cryptoResult,stockManageResult}));
-  })().catch(e=>console.error(JSON.stringify({event:'crypto_priority_cycle_failed',build:BUILD,message:e.message}))));
+    let cryptoResult=null,stockResult=null;
+    try{cryptoResult=await runCryptoFreeTier(env,now,{discover:true});}
+    catch(e){cryptoResult={status:'error',message:e.message};}
+    try{stockResult=await runStockFreeTier(env,now,{discover:true});}
+    catch(e){stockResult={status:'error',message:e.message};}
+    console.log(JSON.stringify({event:'hybrid_recovery_cycle',build:BUILD,route,cryptoResult,stockResult}));
+  })().catch(e=>console.error(JSON.stringify({event:'hybrid_recovery_cycle_failed',build:BUILD,message:e.message}))));
  }
 };
 export default app;
