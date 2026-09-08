@@ -1,7 +1,7 @@
 import { TradingState } from './state.js';
 import { alpaca } from './api.js';
 import { runStockFreeTier, stockFreeTierStatus, stockOpportunityDiagnostics, STOCK_STRATEGY } from './free-tier-stock.js';
-import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, cryptoExecutionDirective, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './quant-crypto-v24.js';
+import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, cryptoExecutionDirective, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './quant-crypto-runtime.js';
 import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
