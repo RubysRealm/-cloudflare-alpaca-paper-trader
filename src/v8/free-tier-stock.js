@@ -133,7 +133,8 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   const snap=(await fetchSnapshots(env,symbols)).snapshots||{},lights=lightDiagnostics(env,symbols,snap),light=lights.filter(x=>x.lightPass);
   const finalists=light.slice(0,Math.max(1,int(env.FREE_TIER_STOCK_FINALISTS,3)));
   const news=await recentNewsContext(env,finalists.map(x=>x.symbol),now,180);
-  const deepAll=await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))),deep=deepAll.filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
+  const deepAll=await Promise.all(finalists.map(x=>deepCandidate(env,x.symbol,snap[x.symbol],news.get(x.symbol))));
+  const deep=deepAll.filter(x=>x?.deepPass).sort((a,b)=>b.opportunityScore-a.opportunityScore);
   const botLots=botLotsFromOrders(orders),botPos=(positions||[]).filter(p=>botLots[p.symbol]?.qty>1e-8),maxPos=int(env.STOCK_MAX_CONCURRENT_POSITIONS,1);
   if(botPos.length>=maxPos||!deep.length) return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),rejections:deepAll.filter(x=>!x?.deepPass).map(x=>({symbol:x?.symbol,reasons:x?.deepReasons||['unknown']})),actions};
   const c=deep[0]; let asset=await fetchAsset(env,c.symbol); if(!asset||asset.tradable===false||asset.fractionable===false) return {status:'hold',strategy:STOCK_STRATEGY,mode:'asset_block'};
