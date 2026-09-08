@@ -1,12 +1,12 @@
 import { TradingState } from './state.js';
 import { alpaca } from './api.js';
 import { runStockFreeTier, stockFreeTierStatus, stockOpportunityDiagnostics, STOCK_STRATEGY } from './free-tier-stock.js';
-import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './free-tier-crypto.js';
+import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, cryptoExecutionDirective, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './quant-crypto-v24.js';
 import { routeResearchMarket } from './free-tier-router.js';
 
 export { TradingState };
 
-const BUILD='free-tier-research-v5-hybrid';
+const BUILD='free-tier-research-v6-quant';
 
 function cryptoPerformance(orders){
   const inv={},closed=[];
@@ -21,7 +21,7 @@ async function liveCrypto(env){
   const [positions,orders,account]=await Promise.all([alpaca(env,'/v2/positions'),alpaca(env,'/v2/orders?status=all&limit=500&direction=desc&nested=false'),alpaca(env,'/v2/account')]);
   const all=(orders||[]).filter(o=>String(o.client_order_id||'').startsWith('papercrypto-')),current=all.filter(o=>String(o.client_order_id||'').startsWith(CRYPTO_PREFIX)),legacy=all.filter(o=>!String(o.client_order_id||'').startsWith(CRYPTO_PREFIX));
   const cp=(positions||[]).filter(p=>String(p.asset_class||'').toLowerCase()==='crypto'||String(p.symbol||'').includes('/')).map(p=>({symbol:p.symbol,qty:+p.qty||0,marketValue:+p.market_value||0,avgEntryPrice:+p.avg_entry_price||0,currentPrice:+p.current_price||0,unrealizedPl:+p.unrealized_pl||0,unrealizedPlpc:+p.unrealized_plpc||0}));
-  return{endpoint:'paper',strategy:CRYPTO_STRATEGY,cryptoEntryBuild:BUILD,orderPrefix:CRYPTO_PREFIX,exitPolicy:'gross_velocity_profit_rotation',legacyExecutionActive:false,cryptoAccountStatus:account?.crypto_status||null,cryptoPositionCount:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)>1).length,rawCryptoPositionCount:cp.length,cryptoPositions:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)>1),dustPositions:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)<=1),currentStrategyOrderCount:current.length,legacyHistoricalOrderCount:legacy.length,lastCurrentStrategyOrderAt:current[0]?.submitted_at||null,performance:cryptoPerformance(current),recentCurrentStrategyOrders:current.slice(0,20).map(o=>({symbol:o.symbol,side:o.side,type:o.type,status:o.status,submittedAt:o.submitted_at,filledAt:o.filled_at||null,filledAvgPrice:+o.filled_avg_price||0,filledQty:+o.filled_qty||0,notional:+o.notional||0,limitPrice:+o.limit_price||0,clientOrderId:o.client_order_id}))};
+  return{endpoint:'paper',strategy:CRYPTO_STRATEGY,cryptoEntryBuild:BUILD,orderPrefix:CRYPTO_PREFIX,exitPolicy:'risk_sized_2R_scale_ema9_trail',legacyExecutionActive:false,cryptoAccountStatus:account?.crypto_status||null,cryptoPositionCount:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)>1).length,rawCryptoPositionCount:cp.length,cryptoPositions:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)>1),dustPositions:cp.filter(p=>Math.abs(p.marketValue||p.qty*p.currentPrice)<=1),currentStrategyOrderCount:current.length,legacyHistoricalOrderCount:legacy.length,lastCurrentStrategyOrderAt:current[0]?.submitted_at||null,performance:cryptoPerformance(current),recentCurrentStrategyOrders:current.slice(0,20).map(o=>({symbol:o.symbol,side:o.side,type:o.type,status:o.status,submittedAt:o.submitted_at,filledAt:o.filled_at||null,filledAvgPrice:+o.filled_avg_price||0,filledQty:+o.filled_qty||0,notional:+o.notional||0,limitPrice:+o.limit_price||0,clientOrderId:o.client_order_id}))};
 }
 
 async function accountState(env){
@@ -35,19 +35,20 @@ const app={
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
   if(url.pathname==='/api/status'){
     const s=stockFreeTierStatus(env);
-    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'cross_venue_recovery'},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'quant_alpha85_recovery'},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/crypto/status'){
     const s=cryptoFreeTierStatus(env);
-    return Response.json({...s,freeTier:{...s.freeTier,alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{...s.research,antiChaseEntryTiming:true},enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true'},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,enabled:String(env.CRYPTO_TRADING_ENABLED??'true')==='true',cryptoEntryBuild:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true'},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/stock/opportunity')return Response.json(await stockOpportunityDiagnostics(env,Date.now()),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/opportunity')return Response.json(await cryptoOpportunityDiagnostics(env,Date.now()),{headers:{'Cache-Control':'no-store'}});
+  if(url.pathname==='/api/crypto/directive')return Response.json(await cryptoExecutionDirective(env,Date.now()),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/router/opportunity')return Response.json({...await routeResearchMarket(env,Date.now()),build:BUILD},{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/portfolio/history'){try{return Response.json(await alpaca(env,'/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=continuous&pnl_reset=no_reset'),{headers:{'Cache-Control':'no-store'}});}catch(e){return Response.json({error:e.message},{status:502});}}
-  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'cross_venue_recovery'});
+  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'quant_alpha85_recovery'});
  },
  async scheduled(controller,env,ctx){
   const now=controller.scheduledTime;
@@ -58,8 +59,8 @@ const app={
     catch(e){cryptoResult={status:'error',message:e.message};}
     try{stockResult=await runStockFreeTier(env,now,{discover:true});}
     catch(e){stockResult={status:'error',message:e.message};}
-    console.log(JSON.stringify({event:'hybrid_recovery_cycle',build:BUILD,route,cryptoResult,stockResult}));
-  })().catch(e=>console.error(JSON.stringify({event:'hybrid_recovery_cycle_failed',build:BUILD,message:e.message}))));
+    console.log(JSON.stringify({event:'hybrid_quant_cycle',build:BUILD,route,cryptoResult,stockResult}));
+  })().catch(e=>console.error(JSON.stringify({event:'hybrid_quant_cycle_failed',build:BUILD,message:e.message}))));
  }
 };
 export default app;
