@@ -44,7 +44,7 @@ function entryTimingOk(base){
 
 async function deepCandidate(env,symbol,snapshot,news){
   const [m1,m5,m15,h1,d1,tape]=await Promise.all([
-    fetchBars(env,symbol,'1Min',40),fetchBars(env,symbol,'5Min',45),fetchBars(env,symbol,'15Min',32),fetchBars(env,symbol,'1Hour',24),fetchBars(env,symbol,'1Day',20),tradeTape(env,symbol)
+    fetchBars(env,symbol,'1Min',45),fetchBars(env,symbol,'5Min',45),fetchBars(env,symbol,'15Min',45),fetchBars(env,symbol,'1Hour',45),fetchBars(env,symbol,'1Day',45),tradeTape(env,symbol)
   ]);
   const base=combineSignals(symbol,timeframeSignal(symbol,m1.bars),timeframeSignal(symbol,m5.bars),timeframeSignal(symbol,m15.bars),snapshot||{});
   if(!base?.valid) return {symbol,deepPass:false,deepReasons:['signal_unavailable']};
@@ -94,7 +94,7 @@ async function managePositions(env,now,positions,orders,snapshots){
     const qty=Math.min(Math.abs(+p.qty||0),lot.qty); if(!(qty>1e-8)) continue;
     const sf=snapFields(snapshots?.[p.symbol]||{}),entry=+(lot.avgEntry||p.avg_entry_price||0),price=sf.bid>0?sf.bid:+p.current_price||0;
     try{
-      const [a,b,c]=await Promise.all([fetchBars(env,p.symbol,'1Min',20),fetchBars(env,p.symbol,'5Min',16),fetchBars(env,p.symbol,'15Min',12)]);
+      const [a,b,c]=await Promise.all([fetchBars(env,p.symbol,'1Min',40),fetchBars(env,p.symbol,'5Min',40),fetchBars(env,p.symbol,'15Min',40)]);
       const signal=combineSignals(p.symbol,timeframeSignal(p.symbol,a.bars),timeframeSignal(p.symbol,b.bars),timeframeSignal(p.symbol,c.bars),snapshots?.[p.symbol]||{});
       const evaluated={...signal,price};
       const d=exitDecision({...p,qty:String(qty),avg_entry_price:String(entry),current_price:String(price)},evaluated,env,now,etParts);
@@ -144,4 +144,4 @@ export async function runStockFreeTier(env,now,{discover=true}={}){
   return {status:actions.length?'acted':'hold',strategy:STOCK_STRATEGY,mode:'deep_research',discoveryCount:symbols.length,finalists:finalists.map(x=>x.symbol),qualified:deep.map(x=>x.symbol),actions};
 }
 
-export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',entryEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',maxPositions:int(env.STOCK_MAX_CONCURRENT_POSITIONS,1),maxPositionUsd:num(env.STOCK_MAX_POSITION_USD,12000),entryWindowET:[int(env.STOCK_ENTRY_START_MINUTE_ET,585),int(env.STOCK_ENTRY_END_MINUTE_ET,930)],freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'marketwide_liquid_movers_then_top3_deep_research',finalists:int(env.FREE_TIER_STOCK_FINALISTS,3),alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,multiFinalistResearch:true,candidateDiagnostics:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,antiChaseEntryTiming:true,costAdjustedEdge:true,explicitHardStop:true,hardStopMarketExit:true,dynamicProfitTarget:true,tradeVolumeObjective:false}};}
+export function stockFreeTierStatus(env){return {strategy:STOCK_STRATEGY,endpoint:'paper',entryEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',maxPositions:int(env.STOCK_MAX_CONCURRENT_POSITIONS,1),maxPositionUsd:num(env.STOCK_MAX_POSITION_USD,12000),entryWindowET:[int(env.STOCK_ENTRY_START_MINUTE_ET,585),int(env.STOCK_ENTRY_END_MINUTE_ET,930)],freeTier:{cpuMsPerInvocation:10,requestLimitPerDay:100000,architecture:'marketwide_liquid_movers_then_top5_deep_research',finalists:int(env.FREE_TIER_STOCK_FINALISTS,3),alternatingMarketDiscovery:false,adaptiveMarketRouting:true},research:{marketWideMovers:true,marketWideMostActive:true,deepFinalistResearch:true,multiFinalistResearch:true,candidateDiagnostics:true,timeframes:['1Min','5Min','15Min','1Hour','1Day'],recentTradeTape:true,catalystAware:true,researchBeforeExecution:true,antiChaseEntryTiming:true,costAdjustedEdge:true,explicitHardStop:true,hardStopMarketExit:true,dynamicProfitTarget:true,tradeVolumeObjective:false}};}
