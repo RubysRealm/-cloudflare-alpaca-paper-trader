@@ -1,6 +1,6 @@
 import { TradingState } from './state.js';
 import { alpaca } from './api.js';
-import { runStockFreeTier, stockFreeTierStatus, stockOpportunityDiagnostics, STOCK_STRATEGY } from './free-tier-stock.js';
+import { runStockFreeTier, stockFreeTierStatus, stockOpportunityDiagnostics, STOCK_STRATEGY } from './stock-swing-runtime.js';
 import { runCryptoFreeTier, cryptoFreeTierStatus, cryptoOpportunityDiagnostics, cryptoExecutionDirective, CRYPTO_STRATEGY, CRYPTO_PREFIX } from './quant-crypto-runtime.js';
 import { routeResearchMarket } from './free-tier-router.js';
 
@@ -35,7 +35,7 @@ const app={
   if(request.method!=='GET')return Response.json({error:'not_found'},{status:404});
   if(url.pathname==='/api/status'){
     const s=stockFreeTierStatus(env);
-    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'quant_alpha85_recovery'},{headers:{'Cache-Control':'no-store'}});
+    return Response.json({...s,status:String(env.TRADING_ENABLED)==='true'?'armed':'disabled',build:BUILD,adaptiveMarketRouting:true,primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'portfolio_swing_harvest_reentry',cryptoMode:'quant_alpha85_recovery'},{headers:{'Cache-Control':'no-store'}});
   }
   if(url.pathname==='/api/crypto/status'){
     const s=cryptoFreeTierStatus(env);
@@ -48,7 +48,7 @@ const app={
   if(url.pathname==='/api/crypto/live')return Response.json(await liveCrypto(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/state')return Response.json(await accountState(env),{headers:{'Cache-Control':'no-store'}});
   if(url.pathname==='/api/portfolio/history'){try{return Response.json(await alpaca(env,'/v2/account/portfolio/history?period=1D&timeframe=1Min&intraday_reporting=continuous&pnl_reset=no_reset'),{headers:{'Cache-Control':'no-store'}});}catch(e){return Response.json({error:e.message},{status:502});}}
-  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'liquid_intraday_recovery',cryptoMode:'quant_alpha85_recovery'});
+  return Response.json({service:'alpaca-paper-guard',build:BUILD,stock:STOCK_STRATEGY,crypto:CRYPTO_STRATEGY,endpoint:'paper',primaryExecutionMarket:'hybrid',newStockEntriesEnabled:String(env.NEW_STOCK_ENTRIES_ENABLED??'false')==='true',stockMode:'portfolio_swing_harvest_reentry',cryptoMode:'quant_alpha85_recovery'});
  },
  async scheduled(controller,env,ctx){
   const now=controller.scheduledTime;
